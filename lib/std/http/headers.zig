@@ -139,7 +139,7 @@ pub const Headers = struct {
     pub fn clone(self: Self, allocator: *Allocator) !Self {
         var other = Headers.init(allocator);
         errdefer other.deinit();
-        try other.data.ensureCapacity(self.data.len);
+        try other.data.ensureCapacity(self.data.items.len);
         try other.index.initCapacity(self.index.entries.len);
         for (self.data.span()) |entry| {
             try other.append(entry.name, entry.value, entry.never_index);
@@ -152,7 +152,7 @@ pub const Headers = struct {
     }
 
     pub fn append(self: *Self, name: []const u8, value: []const u8, never_index: ?bool) !void {
-        const n = self.data.len + 1;
+        const n = self.data.items.len + 1;
         try self.data.ensureCapacity(n);
         var entry: HeaderEntry = undefined;
         if (self.index.get(name)) |kv| {
@@ -197,10 +197,10 @@ pub const Headers = struct {
         if (self.index.remove(name)) |kv| {
             var dex = &kv.value;
             // iterate backwards
-            var i = dex.len;
+            var i = dex.items.len;
             while (i > 0) {
                 i -= 1;
-                const data_index = dex.at(i);
+                const data_index = dex.items[i];
                 const removed = self.data.orderedRemove(data_index);
                 assert(mem.eql(u8, removed.name, name));
                 removed.deinit();
@@ -220,18 +220,18 @@ pub const Headers = struct {
         const removed = self.data.orderedRemove(i);
         const kv = self.index.get(removed.name).?;
         var dex = &kv.value;
-        if (dex.len == 1) {
+        if (dex.items.len == 1) {
             // was last item; delete the index
             _ = self.index.remove(kv.key);
             dex.deinit();
             removed.deinit();
             self.allocator.free(kv.key);
         } else {
-            dex.shrink(dex.len - 1);
+            dex.shrink(dex.items.len - 1);
             removed.deinit();
         }
         // if it was the last item; no need to rebuild index
-        if (i != self.data.len) {
+        if (i != self.data.items.len) {
             self.rebuild_index();
         }
     }
@@ -242,25 +242,25 @@ pub const Headers = struct {
         const removed = self.data.swapRemove(i);
         const kv = self.index.get(removed.name).?;
         var dex = &kv.value;
-        if (dex.len == 1) {
+        if (dex.items.len == 1) {
             // was last item; delete the index
             _ = self.index.remove(kv.key);
             dex.deinit();
             removed.deinit();
             self.allocator.free(kv.key);
         } else {
-            dex.shrink(dex.len - 1);
+            dex.shrink(dex.items.len - 1);
             removed.deinit();
         }
         // if it was the last item; no need to rebuild index
-        if (i != self.data.len) {
+        if (i != self.data.items.len) {
             self.rebuild_index();
         }
     }
 
     /// Access the header at the specified index.
     pub fn at(self: Self, i: usize) HeaderEntry {
-        return self.data.at(i);
+        return self.data.items[i];
     }
 
     /// Returns a list of indices containing headers with the given name.
@@ -277,10 +277,10 @@ pub const Headers = struct {
     pub fn get(self: Self, allocator: *Allocator, name: []const u8) !?[]const HeaderEntry {
         const dex = self.getIndices(name) orelse return null;
 
-        const buf = try allocator.alloc(HeaderEntry, dex.len);
+        const buf = try allocator.alloc(HeaderEntry, dex.items.len);
         var n: usize = 0;
         for (dex.span()) |idx| {
-            buf[n] = self.data.at(idx);
+            buf[n] = self.data.items[idx];
             n += 1;
         }
         return buf;
@@ -301,20 +301,20 @@ pub const Headers = struct {
 
         // adapted from mem.join
         const total_len = blk: {
-            var sum: usize = dex.len - 1; // space for separator(s)
+            var sum: usize = dex.items.len - 1; // space for separator(s)
             for (dex.span()) |idx|
-                sum += self.data.at(idx).value.len;
+                sum += self.data.items[idx].value.len;
             break :blk sum;
         };
 
         const buf = try allocator.alloc(u8, total_len);
         errdefer allocator.free(buf);
 
-        const first_value = self.data.at(dex.at(0)).value;
+        const first_value = self.data.items[dex.items[0]].value;
         mem.copy(u8, buf, first_value);
         var buf_index: usize = first_value.len;
-        for (dex.toSlice()[1..]) |idx| {
-            const value = self.data.at(idx).value;
+        for (dex.items[1..]) |idx| {
+            const value = self.data.items[idx].value;
             buf[buf_index] = ',';
             buf_index += 1;
             mem.copy(u8, buf[buf_index..], value);
@@ -330,7 +330,7 @@ pub const Headers = struct {
             var it = self.index.iterator();
             while (it.next()) |kv| {
                 var dex = &kv.value;
-                dex.len = 0; // keeps capacity available
+                dex.items.len = 0; // keeps capacity available
             }
         }
         { // fill up indexes again; we know capacity is fine from before
@@ -342,7 +342,7 @@ pub const Headers = struct {
     }
 
     pub fn sort(self: *Self) void {
-        std.sort.sort(HeaderEntry, self.data.toSlice(), HeaderEntry.compare);
+        std.sort.sort(HeaderEntry, self.data.items, HeaderEntry.compare);
         self.rebuild_index();
     }
 

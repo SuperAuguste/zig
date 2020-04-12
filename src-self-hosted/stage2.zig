@@ -115,6 +115,9 @@ const Error = extern enum {
     InvalidOperatingSystemVersion,
     UnknownClangOption,
     NestedResponseFile,
+    ZigIsTheCCompiler,
+    FileBusy,
+    Locked,
 };
 
 const FILE = std.c.FILE;
@@ -239,7 +242,7 @@ fn fmtMain(argc: c_int, argv: [*]const [*:0]const u8) !void {
     }
 
     if (stdin_flag) {
-        if (input_files.len != 0) {
+        if (input_files.items.len != 0) {
             try stderr.writeAll("cannot use --stdin with positional arguments\n");
             process.exit(1);
         }
@@ -273,7 +276,7 @@ fn fmtMain(argc: c_int, argv: [*]const [*:0]const u8) !void {
         return;
     }
 
-    if (input_files.len == 0) {
+    if (input_files.items.len == 0) {
         try stderr.writeAll("expected at least one source file argument\n");
         process.exit(1);
     }
@@ -846,6 +849,7 @@ export fn stage2_libc_parse(stage1_libc: *Stage2LibCInstallation, libc_file_z: [
         error.NoDevice => return .NoDevice,
         error.NotDir => return .NotDir,
         error.DeviceBusy => return .DeviceBusy,
+        error.FileLocksNotSupported => unreachable,
     };
     stage1_libc.initFromStage2(libc);
     return .None;
@@ -868,6 +872,7 @@ export fn stage2_libc_find_native(stage1_libc: *Stage2LibCInstallation) Error {
         error.LibCKernel32LibNotFound => return .LibCKernel32LibNotFound,
         error.UnsupportedArchitecture => return .UnsupportedArchitecture,
         error.WindowsSdkNotFound => return .WindowsSdkNotFound,
+        error.ZigIsTheCCompiler => return .ZigIsTheCCompiler,
     };
     stage1_libc.initFromStage2(libc);
     return .None;
@@ -890,6 +895,22 @@ export fn stage2_libc_render(stage1_libc: *Stage2LibCInstallation, output_file: 
         error.InputOutput => return .FileSystem,
     };
     return .None;
+}
+
+fn enumToString(value: var, type_name: []const u8) ![]const u8 {
+    switch (@typeInfo(@TypeOf(value))) {
+        .Enum => |e| {
+            if (e.is_exhaustive) {
+                return std.fmt.allocPrint(std.heap.c_allocator, ".{}", .{@tagName(value)});
+            } else {
+                return std.fmt.allocPrint(std.heap.c_allocator,
+                    "@intToEnum({}, {})",
+                    .{type_name, @enumToInt(value)}
+                );
+            }
+        },
+        else => unreachable 
+    }
 }
 
 // ABI warning
@@ -1109,13 +1130,13 @@ const Stage2Target = extern struct {
 
             .windows => try os_builtin_str_buffer.outStream().print(
                 \\ .windows = .{{
-                \\        .min = .{},
-                \\        .max = .{},
+                \\        .min = {},
+                \\        .max = {},
                 \\    }}}},
                 \\
             , .{
-                @tagName(target.os.version_range.windows.min),
-                @tagName(target.os.version_range.windows.max),
+                try enumToString(target.os.version_range.windows.min, "Target.Os.WindowsVersion"),
+                try enumToString(target.os.version_range.windows.max, "Target.Os.WindowsVersion")
             }),
         }
         try os_builtin_str_buffer.appendSlice("};\n");
@@ -1293,6 +1314,7 @@ pub const ClangArgIterator = extern struct {
         dep_file,
         framework_dir,
         framework,
+        nostdlibinc,
     };
 
     const Args = struct {
