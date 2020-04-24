@@ -1012,25 +1012,27 @@ pub const Dir = struct {
     /// On success, caller owns returned buffer.
     /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
     pub fn readFileAlloc(self: Dir, allocator: *mem.Allocator, file_path: []const u8, max_bytes: usize) ![]u8 {
-        return self.readFileAllocAligned(allocator, file_path, max_bytes, @alignOf(u8));
+        return self.readFileAllocOptions(allocator, file_path, max_bytes, @alignOf(u8), null);
     }
 
     /// On success, caller owns returned buffer.
     /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
-    pub fn readFileAllocAligned(
+    /// Allows specifying alignment and a sentinel value.
+    pub fn readFileAllocOptions(
         self: Dir,
         allocator: *mem.Allocator,
         file_path: []const u8,
         max_bytes: usize,
-        comptime A: u29,
-    ) ![]align(A) u8 {
+        comptime alignment: u29,
+        comptime optional_sentinel: ?u8,
+    ) !(if (optional_sentinel) |s| [:s]align(alignment) u8 else []align(alignment) u8) {
         var file = try self.openFile(file_path, .{});
         defer file.close();
 
         const size = math.cast(usize, try file.getEndPos()) catch math.maxInt(usize);
         if (size > max_bytes) return error.FileTooBig;
 
-        const buf = try allocator.alignedAlloc(u8, A, size);
+        const buf = try allocator.allocWithOptions(u8, size, alignment, optional_sentinel);
         errdefer allocator.free(buf);
 
         try file.inStream().readNoEof(buf);
@@ -1343,8 +1345,10 @@ pub const Dir = struct {
         mode: File.Mode = File.default_mode,
     };
 
-    /// `dest_path` must remain valid for the lifetime of `AtomicFile`.
-    /// Call `AtomicFile.finish` to atomically replace `dest_path` with contents.
+    /// Directly access the `.file` field, and then call `AtomicFile.finish`
+    /// to atomically replace `dest_path` with contents.
+    /// Always call `AtomicFile.deinit` to clean up, regardless of whether `AtomicFile.finish` succeeded.
+    /// `dest_path` must remain valid until `AtomicFile.deinit` is called.
     pub fn atomicFile(self: Dir, dest_path: []const u8, options: AtomicFileOptions) !AtomicFile {
         if (path.dirname(dest_path)) |dirname| {
             const dir = try self.openDir(dirname, .{});

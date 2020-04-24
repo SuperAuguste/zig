@@ -1,3 +1,18 @@
+test "zig fmt: decl between fields" {
+    try testError(
+        \\const S = struct {
+        \\    const foo = 2;
+        \\    const bar = 2;
+        \\    const baz = 2;
+        \\    a: usize,
+        \\    const foo1 = 2;
+        \\    const bar1 = 2;
+        \\    const baz1 = 2;
+        \\    b: usize,
+        \\};
+    );
+}
+
 test "zig fmt: errdefer with payload" {
     try testCanonical(
         \\pub fn main() anyerror!void {
@@ -95,17 +110,6 @@ test "zig fmt: trailing comma in fn parameter list" {
         \\    a: i32,
         \\    b: i32,
         \\) linksection(".text") callconv(.C) i32 {}
-        \\
-    );
-}
-
-// TODO: Remove condition after deprecating 'typeOf'. See https://github.com/ziglang/zig/issues/1348
-test "zig fmt: change @typeOf to @TypeOf" {
-    try testTransform(
-        \\const a = @typeOf(@as(usize, 10));
-        \\
-    ,
-        \\const a = @TypeOf(@as(usize, 10));
         \\
     );
 }
@@ -387,7 +391,7 @@ test "zig fmt: correctly space struct fields with doc comments" {
         \\    c: u8,
         \\};
         \\
-        ,
+    ,
         \\pub const S = struct {
         \\    /// A
         \\    a: u8,
@@ -2001,11 +2005,11 @@ test "zig fmt: struct declaration" {
         \\    f1: u8,
         \\    f3: u8,
         \\
+        \\    f2: u8,
+        \\
         \\    fn method(self: *Self) Self {
         \\        return self.*;
         \\    }
-        \\
-        \\    f2: u8,
         \\};
         \\
         \\const Ps = packed struct {

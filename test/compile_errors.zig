@@ -2,6 +2,97 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("invalid pointer syntax",
+        \\export fn foo() void {
+        \\    var guid: *:0 const u8 = undefined;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:15: error: sentinels are only allowed on unknown-length pointers",
+    });
+
+    cases.add("declaration between fields",
+        \\const S = struct {
+        \\    const foo = 2;
+        \\    const bar = 2;
+        \\    const baz = 2;
+        \\    a: usize,
+        \\    const foo1 = 2;
+        \\    const bar1 = 2;
+        \\    const baz1 = 2;
+        \\    b: usize,
+        \\};
+        \\comptime {
+        \\    _ = S;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:6:5: error: declarations are not allowed between container fields",
+    });
+
+    cases.add("non-extern function with var args",
+        \\fn foo(args: ...) void {}
+        \\export fn entry() void {
+        \\    foo();
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:1:1: error: non-extern function is variadic",
+    });
+
+    cases.addTest("invalid int casts",
+        \\export fn foo() void {
+        \\    var a: u32 = 2;
+        \\    _ = @intCast(comptime_int, a);
+        \\}
+        \\export fn bar() void {
+        \\    var a: u32 = 2;
+        \\    _ = @intToFloat(u32, a);
+        \\}
+        \\export fn baz() void {
+        \\    var a: u32 = 2;
+        \\    _ = @floatToInt(u32, a);
+        \\}
+        \\export fn qux() void {
+        \\    var a: u32 = 2;
+        \\    _ = @intCast(comptime_int, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:32: error: expected type 'comptime_int', found 'u32'",
+        "tmp.zig:3:9: note: referenced here",
+        "tmp.zig:7:21: error: expected float type, found 'u32'",
+        "tmp.zig:7:9: note: referenced here",
+        "tmp.zig:11:26: error: expected float type, found 'u32'",
+        "tmp.zig:11:9: note: referenced here",
+        "tmp.zig:15:32: error: expected type 'comptime_int', found 'u32'",
+        "tmp.zig:15:9: note: referenced here",
+    });
+
+    cases.addTest("invalid float casts",
+        \\export fn foo() void {
+        \\    var a: f32 = 2;
+        \\    _ = @floatCast(comptime_float, a);
+        \\}
+        \\export fn bar() void {
+        \\    var a: f32 = 2;
+        \\    _ = @floatToInt(f32, a);
+        \\}
+        \\export fn baz() void {
+        \\    var a: f32 = 2;
+        \\    _ = @intToFloat(f32, a);
+        \\}
+        \\export fn qux() void {
+        \\    var a: f32 = 2;
+        \\    _ = @floatCast(comptime_float, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:36: error: expected type 'comptime_float', found 'f32'",
+        "tmp.zig:3:9: note: referenced here",
+        "tmp.zig:7:21: error: expected integer type, found 'f32'",
+        "tmp.zig:7:9: note: referenced here",
+        "tmp.zig:11:26: error: expected int type, found 'f32'",
+        "tmp.zig:11:9: note: referenced here",
+        "tmp.zig:15:36: error: expected type 'comptime_float', found 'f32'",
+        "tmp.zig:15:9: note: referenced here",
+    });
+
     cases.addTest("invalid assignments",
         \\export fn entry1() void {
         \\    var a: []const u8 = "foo";
@@ -647,15 +738,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:28: error: invalid character: ';'",
     });
 
-    cases.add("var args without c calling conv",
-        \\fn foo(args: ...) void {}
-        \\comptime {
-        \\    _ = foo;
-        \\}
-    , &[_][]const u8{
-        "tmp.zig:1:8: error: var args only allowed in functions with C calling convention",
-    });
-
     cases.add("comptime struct field, no init value",
         \\const Foo = struct {
         \\    comptime b: i32,
@@ -800,7 +882,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:11:25: error: expected type 'u32', found '@TypeOf(get_uval).ReturnType.ErrorSet!u32'",
     });
 
-    cases.add("asigning to struct or union fields that are not optionals with a function that returns an optional",
+    cases.add("assigning to struct or union fields that are not optionals with a function that returns an optional",
         \\fn maybe(is: bool) ?u8 {
         \\    if (is) return @as(u8, 10) else return null;
         \\}
@@ -1028,7 +1110,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    _ = @Type(@typeInfo(struct { }));
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:15: error: @Type not availble for 'TypeInfo.Struct'",
+        "tmp.zig:2:15: error: @Type not available for 'TypeInfo.Struct'",
     });
 
     cases.add("wrong type for result ptr to @asyncCall",
@@ -2603,7 +2685,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:7:17: error: switch on type 'type' provides no expression parameter",
     });
 
-    cases.add("function protoype with no body",
+    cases.add("function prototype with no body",
         \\fn foo() void;
         \\export fn entry() void {
         \\    foo();
@@ -4478,7 +4560,17 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    const pointer = &array[0];
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:27: error: index 0 outside array of size 0",
+        "tmp.zig:3:27: error: accessing a zero length array is not allowed",
+    });
+
+    cases.add("indexing an array of size zero with runtime index",
+        \\const array = [_]u8{};
+        \\export fn foo() void {
+        \\    var index: usize = 0;
+        \\    const pointer = &array[index];
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:4:27: error: accessing a zero length array is not allowed",
     });
 
     cases.add("compile time division by zero",
@@ -5925,7 +6017,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    return 0x11 << x;
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:17: error: LHS of shift must be an integer type, or RHS must be compile-time known",
+        "tmp.zig:2:17: error: LHS of shift must be a fixed-width integer type, or RHS must be compile-time known",
     });
 
     cases.add("shifting RHS is log2 of LHS int bit width",

@@ -1887,7 +1887,7 @@ static bool iter_function_params_c_abi(CodeGen *g, ZigType *fn_type, FnWalk *fn_
                     if (type_is_nonnull_ptr(g, ty)) {
                         addLLVMArgAttr(llvm_fn, fn_walk->data.attrs.gen_i, "nonnull");
                     }
-                    if (ptr_type->data.pointer.is_const) {
+                    if (ptr_type->id == ZigTypeIdPointer && ptr_type->data.pointer.is_const) {
                         addLLVMArgAttr(llvm_fn, fn_walk->data.attrs.gen_i, "readonly");
                     }
                     if (param_info->is_noalias) {
@@ -2071,7 +2071,7 @@ var_ok:
 
 void walk_function_params(CodeGen *g, ZigType *fn_type, FnWalk *fn_walk) {
     CallingConvention cc = fn_type->data.fn.fn_type_id.cc;
-    if (cc == CallingConventionC) {
+    if (!calling_convention_allows_zig_types(cc)) {
         size_t src_i = 0;
         for (;;) {
             if (!iter_function_params_c_abi(g, fn_type, fn_walk, src_i))
@@ -3331,12 +3331,16 @@ static LLVMValueRef ir_render_bit_cast(CodeGen *g, IrExecutableGen *executable,
             LLVMPointerType(get_llvm_type(g, wanted_type), 0) : get_llvm_type(g, wanted_type);
         return LLVMBuildBitCast(g->builder, value, wanted_type_ref, "");
     } else if (actual_is_ptr) {
+        // A scalar is wanted but we got a pointer
         LLVMTypeRef wanted_ptr_type_ref = LLVMPointerType(get_llvm_type(g, wanted_type), 0);
         LLVMValueRef bitcasted_ptr = LLVMBuildBitCast(g->builder, value, wanted_ptr_type_ref, "");
         uint32_t alignment = get_abi_alignment(g, actual_type);
         return gen_load_untyped(g, bitcasted_ptr, alignment, false, "");
     } else {
-        zig_unreachable();
+        // A pointer is wanted but we got a scalar
+        assert(actual_type->id == ZigTypeIdPointer);
+        LLVMTypeRef wanted_ptr_type_ref = LLVMPointerType(get_llvm_type(g, wanted_type), 0);
+        return LLVMBuildBitCast(g->builder, value, wanted_ptr_type_ref, "");
     }
 }
 
@@ -3865,6 +3869,9 @@ static LLVMValueRef ir_render_elem_ptr(CodeGen *g, IrExecutableGen *executable, 
             assert(array_type->data.pointer.child_type->id == ZigTypeIdArray);
             array_type = array_type->data.pointer.child_type;
         }
+        
+        assert(array_type->data.array.len != 0 || array_type->data.array.sentinel != nullptr);
+
         if (safety_check_on) {
             uint64_t extra_len_from_sentinel = (array_type->data.array.sentinel != nullptr) ? 1 : 0;
             uint64_t full_len = array_type->data.array.len + extra_len_from_sentinel;
@@ -7140,12 +7147,12 @@ static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *n
     ZigType *type_entry = const_val->type;
     assert(type_has_bits(g, type_entry));
 
-check: switch (const_val->special) {
+    if (const_val->special == ConstValSpecialLazy &&
+        (err = ir_resolve_lazy(g, nullptr, const_val)))
+        codegen_report_errors_and_exit(g);
+
+    switch (const_val->special) {
         case ConstValSpecialLazy:
-            if ((err = ir_resolve_lazy(g, nullptr, const_val))) {
-                codegen_report_errors_and_exit(g);
-            }
-            goto check;
         case ConstValSpecialRuntime:
             zig_unreachable();
         case ConstValSpecialUndef:
@@ -7222,12 +7229,26 @@ check: switch (const_val->special) {
 
                         make_unnamed_struct = false;
                     }
+
                     LLVMValueRef fields[] = {
                         child_val,
                         maybe_val,
+                        nullptr,
                     };
                     if (make_unnamed_struct) {
-                        return LLVMConstStruct(fields, 2, false);
+                        LLVMValueRef result = LLVMConstStruct(fields, 2, false);
+                        uint64_t last_field_offset = LLVMOffsetOfElement(g->target_data_ref, LLVMTypeOf(result), 1);
+                        uint64_t end_offset = last_field_offset +
+                            LLVMStoreSizeOfType(g->target_data_ref, LLVMTypeOf(fields[1]));
+                        uint64_t expected_sz = LLVMABISizeOfType(g->target_data_ref, get_llvm_type(g, type_entry));
+                        unsigned pad_sz = expected_sz - end_offset;
+                        if (pad_sz != 0) {
+                            fields[2] = LLVMGetUndef(LLVMArrayType(LLVMInt8Type(), pad_sz));
+                            result = LLVMConstStruct(fields, 3, false);
+                        }
+                        uint64_t actual_sz = LLVMStoreSizeOfType(g->target_data_ref, LLVMTypeOf(result));
+                        assert(actual_sz == expected_sz);
+                        return result;
                     } else {
                         return LLVMConstNamedStruct(get_llvm_type(g, type_entry), fields, 2);
                     }
@@ -7316,31 +7337,49 @@ check: switch (const_val->special) {
                             continue;
                         }
                         ZigValue *field_val = const_val->data.x_struct.fields[i];
-                        assert(field_val->type != nullptr);
-                        if ((err = ensure_const_val_repr(nullptr, g, nullptr, field_val,
-                                        type_struct_field->type_entry)))
-                        {
+                        ZigType *field_type = field_val->type;
+                        assert(field_type != nullptr);
+                        if ((err = ensure_const_val_repr(nullptr, g, nullptr, field_val, field_type))) {
                             zig_unreachable();
                         }
 
                         LLVMValueRef val = gen_const_val(g, field_val, "");
-                        fields[type_struct_field->gen_index] = val;
-                        make_unnamed_struct = make_unnamed_struct || is_llvm_value_unnamed_type(g, field_val->type, val);
+                        make_unnamed_struct = make_unnamed_struct || is_llvm_value_unnamed_type(g, field_type, val);
 
-                        size_t end_pad_gen_index = (i + 1 < src_field_count) ?
-                            type_entry->data.structure.fields[i + 1]->gen_index :
-                            type_entry->data.structure.gen_field_count;
-                        size_t next_offset = (i + 1 < src_field_count) ?
-                            type_entry->data.structure.fields[i + 1]->offset : type_entry->abi_size;
-                        if (end_pad_gen_index != SIZE_MAX) {
-                            for (size_t gen_i = type_struct_field->gen_index + 1; gen_i < end_pad_gen_index;
-                                    gen_i += 1)
-                            {
-                                size_t pad_bytes = next_offset -
-                                    (type_struct_field->offset + type_struct_field->type_entry->abi_size);
-                                LLVMTypeRef llvm_array_type = LLVMArrayType(LLVMInt8Type(), pad_bytes);
-                                fields[gen_i] = LLVMGetUndef(llvm_array_type);
+                        // Find the next runtime field
+                        size_t next_rt_gen_index = type_entry->data.structure.gen_field_count;
+                        size_t next_offset = type_entry->abi_size;
+                        for (size_t j = i + 1; j < src_field_count; j++) {
+                            const size_t index = type_entry->data.structure.fields[j]->gen_index;
+                            const size_t offset = type_entry->data.structure.fields[j]->offset;
+
+                            if (index != SIZE_MAX) {
+                                next_rt_gen_index = index;
+                                next_offset = offset;
+                                break;
                             }
+                        }
+
+                        // How much padding is needed to reach the next field
+                        const size_t pad_bytes = next_offset -
+                            (type_struct_field->offset + LLVMABISizeOfType(g->target_data_ref, LLVMTypeOf(val)));
+                        // Catch underflow
+                        assert((ssize_t)pad_bytes >= 0);
+
+                        if (type_struct_field->gen_index + 1 != next_rt_gen_index) {
+                            // If there's a hole between this field and the next
+                            // we have an alignment gap to fill
+                            fields[type_struct_field->gen_index] = val;
+                            fields[type_struct_field->gen_index + 1] = LLVMGetUndef(LLVMArrayType(LLVMInt8Type(), pad_bytes));
+                        } else if (pad_bytes != 0) {
+                            LLVMValueRef padded_val[] = {
+                                val,
+                                LLVMGetUndef(LLVMArrayType(LLVMInt8Type(), pad_bytes)),
+                            };
+                            fields[type_struct_field->gen_index] = LLVMConstStruct(padded_val, 2, true);
+                            make_unnamed_struct = true;
+                        } else {
+                            fields[type_struct_field->gen_index] = val;
                         }
                     }
                 }
@@ -7830,7 +7869,7 @@ static void do_code_gen(CodeGen *g) {
 
         FnTypeId *fn_type_id = &fn_table_entry->type_entry->data.fn.fn_type_id;
         CallingConvention cc = fn_type_id->cc;
-        bool is_c_abi = cc == CallingConventionC;
+        bool is_c_abi = !calling_convention_allows_zig_types(cc);
         bool want_sret = want_first_arg_sret(g, fn_type_id);
 
         LLVMValueRef fn = fn_llvm_value(g, fn_table_entry);

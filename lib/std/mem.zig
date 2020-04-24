@@ -105,6 +105,31 @@ pub const Allocator = struct {
         return self.alignedAlloc(T, null, n);
     }
 
+    pub fn allocWithOptions(
+        self: *Allocator,
+        comptime Elem: type,
+        n: usize,
+        /// null means naturally aligned
+        comptime optional_alignment: ?u29,
+        comptime optional_sentinel: ?Elem,
+    ) Error!AllocWithOptionsPayload(Elem, optional_alignment, optional_sentinel) {
+        if (optional_sentinel) |sentinel| {
+            const ptr = try self.alignedAlloc(Elem, optional_alignment, n + 1);
+            ptr[n] = sentinel;
+            return ptr[0..n :sentinel];
+        } else {
+            return self.alignedAlloc(Elem, optional_alignment, n);
+        }
+    }
+
+    fn AllocWithOptionsPayload(comptime Elem: type, comptime alignment: ?u29, comptime sentinel: ?Elem) type {
+        if (sentinel) |s| {
+            return [:s]align(alignment orelse @alignOf(T)) Elem;
+        } else {
+            return []align(alignment orelse @alignOf(T)) Elem;
+        }
+    }
+
     /// Allocates an array of `n + 1` items of type `T` and sets the first `n`
     /// items to `undefined` and the last item to `sentinel`. Depending on the
     /// Allocator implementation, it may be required to call `free` once the
@@ -113,10 +138,10 @@ pub const Allocator = struct {
     /// call `free` when done.
     ///
     /// For allocating a single item, see `create`.
+    ///
+    /// Deprecated; use `allocWithOptions`.
     pub fn allocSentinel(self: *Allocator, comptime Elem: type, n: usize, comptime sentinel: Elem) Error![:sentinel]Elem {
-        var ptr = try self.alloc(Elem, n + 1);
-        ptr[n] = sentinel;
-        return ptr[0..n :sentinel];
+        return self.allocWithOptions(Elem, n, null, sentinel);
     }
 
     pub fn alignedAlloc(
@@ -374,7 +399,7 @@ test "mem.zeroes" {
     testing.expect(a.y == 10);
 
     const ZigStruct = struct {
-        const IntegralTypes = struct {
+        integral_types: struct {
             integer_0: i0,
             integer_8: i8,
             integer_16: i16,
@@ -390,16 +415,13 @@ test "mem.zeroes" {
 
             float_32: f32,
             float_64: f64,
-        };
+        },
 
-        integral_types: IntegralTypes,
-
-        const Pointers = struct {
+        pointers: struct {
             optional: ?*u8,
             c_pointer: [*c]u8,
             slice: []u8,
-        };
-        pointers: Pointers,
+        },
 
         array: [2]u32,
         optional_int: ?u8,
@@ -2005,7 +2027,13 @@ test "sliceAsBytes and bytesAsSlice back" {
 /// Round an address up to the nearest aligned address
 /// The alignment must be a power of 2 and greater than 0.
 pub fn alignForward(addr: usize, alignment: usize) usize {
-    return alignBackward(addr + (alignment - 1), alignment);
+    return alignForwardGeneric(usize, addr, alignment);
+}
+
+/// Round an address up to the nearest aligned address
+/// The alignment must be a power of 2 and greater than 0.
+pub fn alignForwardGeneric(comptime T: type, addr: T, alignment: T) T {
+    return alignBackwardGeneric(T, addr + (alignment - 1), alignment);
 }
 
 test "alignForward" {
@@ -2026,8 +2054,14 @@ test "alignForward" {
 /// Round an address up to the previous aligned address
 /// The alignment must be a power of 2 and greater than 0.
 pub fn alignBackward(addr: usize, alignment: usize) usize {
-    assert(@popCount(usize, alignment) == 1);
-    // 000010000 // example addr
+    return alignBackwardGeneric(usize, addr, alignment);
+}
+
+/// Round an address up to the previous aligned address
+/// The alignment must be a power of 2 and greater than 0.
+pub fn alignBackwardGeneric(comptime T: type, addr: T, alignment: T) T {
+    assert(@popCount(T, alignment) == 1);
+    // 000010000 // example alignment
     // 000001111 // subtract 1
     // 111110000 // binary not
     return addr & ~(alignment - 1);
