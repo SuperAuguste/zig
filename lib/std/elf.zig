@@ -2233,6 +2233,16 @@ pub const R_RISCV = enum(u32) {
     _,
 };
 
+pub const R_BPF = enum(u32) {
+    NONE = 0,
+    @"64_64" = 1,
+    @"64_ABS64" = 2,
+    @"64_ABS32" = 3,
+    @"64_NODYLD32" = 4,
+    @"64_32" = 10,
+    GNU_64_16 = 256,
+};
+
 pub const STV = enum(u2) {
     DEFAULT = 0,
     INTERNAL = 1,

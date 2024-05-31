@@ -638,8 +638,10 @@ test lessThan {
 const backend_can_use_eql_bytes = switch (builtin.zig_backend) {
     // The SPIR-V backend does not support the optimized path yet.
     .stage2_spirv64 => false,
-    // The RISC-V does not support vectors.
+    // The RISC-V backend does not support vectors.
     .stage2_riscv64 => false,
+    // The BPF backend does not support vectors.
+    .stage2_bpf => false,
     else => true,
 };
 

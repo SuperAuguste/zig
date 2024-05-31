@@ -73,11 +73,22 @@ const riscv64_relocs = Table(11, elf.R_RISCV, .{
     .{ .tlsdesc, .TLSDESC },
 });
 
+// TODO: I filled this randomly
+// actually fix this
+const bpf_relocs = Table(5, elf.R_BPF, .{
+    .{ .none, .NONE },
+    .{ .abs, .@"64_ABS64" },
+    .{ .rel, .@"64_64" },
+    .{ .irel, .@"64_64" },
+    .{ .glob_dat, .@"64_64" },
+});
+
 pub fn decode(r_type: u32, cpu_arch: std.Target.Cpu.Arch) ?Kind {
     return switch (cpu_arch) {
         .x86_64 => x86_64_relocs.decode(r_type),
         .aarch64 => aarch64_relocs.decode(r_type),
         .riscv64 => riscv64_relocs.decode(r_type),
+        .bpfel, .bpfeb => bpf_relocs.decode(r_type),
         else => @panic("TODO unhandled cpu arch"),
     };
 }
@@ -87,6 +98,7 @@ pub fn encode(comptime kind: Kind, cpu_arch: std.Target.Cpu.Arch) u32 {
         .x86_64 => x86_64_relocs.encode(kind),
         .aarch64 => aarch64_relocs.encode(kind),
         .riscv64 => riscv64_relocs.encode(kind),
+        .bpfel, .bpfeb => bpf_relocs.encode(kind),
         else => @panic("TODO unhandled cpu arch"),
     };
 }
@@ -119,6 +131,7 @@ fn formatRelocType(
             .x86_64 => try writer.print("R_X86_64_{s}", .{@tagName(@as(elf.R_X86_64, @enumFromInt(r_type)))}),
             .aarch64 => try writer.print("R_AARCH64_{s}", .{@tagName(@as(elf.R_AARCH64, @enumFromInt(r_type)))}),
             .riscv64 => try writer.print("R_RISCV_{s}", .{@tagName(@as(elf.R_RISCV, @enumFromInt(r_type)))}),
+            .bpfel, .bpfeb => try writer.print("R_BPF_{s}", .{@tagName(@as(elf.R_BPF, @enumFromInt(r_type)))}),
             else => unreachable,
         },
     }

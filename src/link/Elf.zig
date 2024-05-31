@@ -6300,7 +6300,7 @@ pub fn getTarget(self: Elf) std.Target {
 fn requiresThunks(self: Elf) bool {
     return switch (self.getTarget().cpu.arch) {
         .aarch64 => true,
-        .x86_64, .riscv64 => false,
+        .x86_64, .riscv64, .bpfel, .bpfeb => false,
         else => @panic("TODO unimplemented architecture"),
     };
 }
