@@ -8,16 +8,19 @@ const codegen = @import("../../codegen.zig");
 const CodeGenError = codegen.CodeGenError;
 const Result = codegen.Result;
 const DebugInfoOutput = codegen.DebugInfoOutput;
-const Encoding = @import("Encoding.zig");
 const bits = @import("bits.zig");
 const abi = @import("abi.zig");
 const Register = bits.Register;
 const RegisterManager = abi.RegisterManager;
+const RegisterLock = RegisterManager.RegisterLock;
 const Mir = @import("Mir.zig");
 const Package = @import("../../Package.zig");
 const ErrorMsg = Module.ErrorMsg;
 const Allocator = std.mem.Allocator;
 const InnerError = CodeGenError || error{OutOfRegisters};
+const Type = @import("../../type.zig").Type;
+const Value = @import("../../Value.zig");
+const Emit = @import("Emit.zig");
 
 /// General Purpose
 const gp = abi.RegisterClass.gp;
@@ -43,6 +46,13 @@ liveness: Liveness,
 bin_file: *link.File,
 err_msg: ?*ErrorMsg,
 src_loc: Module.SrcLoc,
+ip: *const InternPool,
+func_index: InternPool.Index,
+
+frame_pointer_offset: FramePointerOffset = @enumFromInt(0),
+
+inst_map: InstMap = .{},
+const_map: ConstMap = .{},
 
 /// Debug field, used to find bugs in the compiler.
 air_bookkeeping: @TypeOf(air_bookkeeping_init) = air_bookkeeping_init,
@@ -50,6 +60,8 @@ air_bookkeeping: @TypeOf(air_bookkeeping_init) = air_bookkeeping_init,
 const air_bookkeeping_init = if (std.debug.runtime_safety) @as(usize, 0) else {};
 
 const MCValue = union(enum) {
+    /// No value
+    none,
     /// Control flow will not allow this value to be observed.
     unreach,
     /// The value is undefined.
@@ -59,7 +71,43 @@ const MCValue = union(enum) {
     immediate: u64,
     /// The value is in a target-specific register.
     register: Register,
+
+    /// Offset from frame pointer (r10).
+    frame_pointer_offset: FramePointerOffset,
+    /// Offset from frame pointer (r10), derefed.
+    stack_value: FramePointerOffset,
+
+    fn isMutable(mcv: MCValue) bool {
+        return switch (mcv) {
+            .none, .unreach => unreachable,
+
+            .undef,
+            .immediate,
+            .frame_pointer_offset,
+            => false,
+
+            .register,
+            .stack_value,
+            => true,
+        };
+    }
+
+    fn deref(mcv: MCValue) MCValue {
+        return switch (mcv) {
+            .none,
+            .unreach,
+            .undef,
+            .stack_value,
+            => unreachable, // not a pointer
+
+            .immediate, .register => @panic("TODO"),
+            .frame_pointer_offset => |off| .{ .stack_value = off },
+        };
+    }
 };
+
+const InstMap = std.AutoArrayHashMapUnmanaged(Air.Inst.Index, MCValue);
+const ConstMap = std.AutoArrayHashMapUnmanaged(InternPool.Index, MCValue);
 
 pub fn generate(
     bin_file: *link.File,
@@ -74,8 +122,7 @@ pub fn generate(
     const comp = bin_file.comp;
     const gpa = comp.gpa;
     const zcu = comp.module.?;
-    // const ip = &zcu.intern_pool;
-    // _ = ip; // autofix
+    const ip = &zcu.intern_pool;
     const func = zcu.funcInfo(func_index);
     const fn_owner_decl = zcu.declPtr(func.owner_decl);
     std.debug.assert(fn_owner_decl.has_tv);
@@ -94,27 +141,30 @@ pub fn generate(
         .bin_file = bin_file,
         .err_msg = null,
         .src_loc = src_loc,
+        .ip = ip,
+        .func_index = func_index,
     };
 
-    try code.appendSlice(&std.mem.toBytes(Encoding.Instruction{
-        .opcode = .{
-            .class = .jmp,
-            .rest = .{
-                .jump = .{
-                    .operation = .exit,
-                    .source = .immediate,
-                },
-            },
-        },
-        .dst_reg = .r0,
-        .src_reg = .r0,
-        .offset = 0,
-        .immediate = .{
-            .imm = 0,
-        },
-    }));
+    // try code.appendSlice(&std.mem.toBytes(Encoding.Instruction{
+    //     .opcode = .{
+    //         .class = .jmp,
+    //         .rest = .{
+    //             .jump = .{
+    //                 .operation = .exit,
+    //                 .source = .immediate,
+    //             },
+    //         },
+    //     },
+    //     .dst_reg = .r0,
+    //     .src_reg = .r0,
+    //     .offset = 0,
+    //     .immediate = .{
+    //         .imm = 0,
+    //     },
+    // }));
 
-    function.gen() catch |err| switch (err) {
+    function.gen() catch |err|
+        switch (err) {
         error.CodegenFail => return Result{ .fail = function.err_msg.? },
         error.OutOfRegisters => return Result{
             .fail = try ErrorMsg.create(gpa, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
@@ -128,7 +178,22 @@ pub fn generate(
     };
     defer mir.deinit(gpa);
 
-    return .ok;
+    var emit = Emit{
+        .mir = mir,
+        .bin_file = bin_file,
+        // .target = targe,
+        .src_loc = src_loc,
+        .code = code,
+    };
+
+    emit.emitMir() catch |err| switch (err) {
+        error.EmitFail => return Result{ .fail = emit.err_msg.? },
+        else => |e| return e,
+    };
+
+    return if (function.err_msg) |em| {
+        return .{ .fail = em };
+    } else .ok;
 }
 
 fn gen(self: *Self) !void {
@@ -141,9 +206,15 @@ fn addInst(self: *Self, inst: Mir.Inst) error{OutOfMemory}!Mir.Inst.Index {
     return result_index;
 }
 
-pub fn addExtra(self: *Self, extra: []const u32) Allocator.Error!u32 {
-    const extra_index: Mir.Inst.Index = @intCast(self.mir_extra.len);
-    try self.mir_extra.append(self.gpa, extra);
+pub fn addExtra(self: *Self, entry: anytype) Allocator.Error!u32 {
+    const extra_index: u32 = @intCast(self.mir_extra.items.len);
+
+    const fields = std.meta.fields(@TypeOf(entry));
+    try self.mir_extra.ensureUnusedCapacity(self.gpa, fields.len);
+    inline for (fields) |field| {
+        self.mir_extra.appendAssumeCapacity(@bitCast(@field(entry, field.name)));
+    }
+
     return extra_index;
 }
 
@@ -224,7 +295,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .xor             => return self.fail("TODO: xor", .{}),
             .shr, .shr_exact => return self.fail("TODO: shr", .{}),
 
-            .alloc           => return self.fail("TODO: alloc", .{}),
+            .alloc           => try self.airAlloc(inst),
             .ret_ptr         => return self.fail("TODO: ret_ptr", .{}),
             .arg             => return self.fail("TODO: arg", .{}),
             .assembly        => return self.fail("TODO: assembly", .{}),
@@ -258,8 +329,8 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .ret             => return self.fail("TODO: ret", .{}),
             .ret_safe        => return self.fail("TODO: ret_safe", .{}),
             .ret_load        => return self.fail("TODO: ret_load", .{}),
-            .store           => return self.fail("TODO: store", .{}),
-            .store_safe      => return self.fail("TODO: store_safe", .{}),
+            .store           => try self.airStore(inst, false),
+            .store_safe      => try self.airStore(inst, true),
             .struct_field_ptr=> return self.fail("TODO: struct_field_ptr", .{}),
             .struct_field_val=> return self.fail("TODO: struct_field_val", .{}),
             .array_to_slice  => return self.fail("TODO: array_to_slice", .{}),
@@ -424,4 +495,274 @@ fn finishAirBookkeeping(self: *Self) void {
     if (std.debug.runtime_safety) {
         self.air_bookkeeping += 1;
     }
+}
+
+/// Stack has a size of 512 bytes.
+/// TODO: More sophisticated space optimizing stack allocation.
+const FramePointerOffset = enum(u9) {
+    _,
+
+    fn alloc(fpo: *FramePointerOffset, bytes: u64, alignment: InternPool.Alignment) ?FramePointerOffset {
+        const current_aligned = alignment.forward(@intFromEnum(fpo.*));
+
+        if (current_aligned + bytes > std.math.maxInt(u9)) return null;
+        fpo.* = @enumFromInt(current_aligned + bytes);
+
+        return @enumFromInt(current_aligned);
+    }
+
+    fn offset(fpo: FramePointerOffset) i16 {
+        return @as(i16, @intFromEnum(fpo));
+    }
+};
+
+fn typeOf(self: *Self, inst: Air.Inst.Ref) Type {
+    const zcu = self.bin_file.comp.module.?;
+    return self.air.typeOf(inst, &zcu.intern_pool);
+}
+
+fn typeOfIndex(self: *Self, inst: Air.Inst.Index) Type {
+    const zcu = self.bin_file.comp.module.?;
+    return self.air.typeOfIndex(inst, &zcu.intern_pool);
+}
+
+/// Use a pointer instruction as the basis for allocating stack memory.
+fn allocMemPtr(self: *Self, inst: Air.Inst.Index) !MCValue {
+    const zcu = self.bin_file.comp.module.?;
+    const ptr_ty = self.typeOfIndex(inst);
+    const val_ty = ptr_ty.childType(zcu);
+
+    return .{
+        .frame_pointer_offset = self.frame_pointer_offset.alloc(
+            val_ty.abiSize(zcu),
+            ptr_ty.ptrAlignment(zcu).max(.@"1"),
+        ) orelse {
+            return self.fail("stack frame size of 512 bytes exceeded", .{});
+        },
+    };
+}
+
+fn finishAir(
+    self: *Self,
+    inst: Air.Inst.Index,
+    result: MCValue,
+    operands: [Liveness.bpi - 1]Air.Inst.Ref,
+) !void {
+    var tomb_bits = self.liveness.getTombBits(inst);
+    for (operands) |op| {
+        _ = op; // autofix
+        const dies = @as(u1, @truncate(tomb_bits)) != 0;
+        tomb_bits >>= 1;
+        if (!dies) continue;
+    }
+    try self.finishAirResult(inst, result);
+}
+
+fn finishAirResult(self: *Self, inst: Air.Inst.Index, result: MCValue) !void {
+    if (self.liveness.isUnused(inst)) switch (result) {
+        .none, .unreach => {},
+        else => unreachable, // Why didn't the result die?
+    } else {
+        try self.inst_map.put(self.gpa, inst, result);
+    }
+    self.finishAirBookkeeping();
+}
+
+fn resolveInst(self: *Self, ref: Air.Inst.Ref) InnerError!MCValue {
+    const zcu = self.bin_file.comp.module.?;
+
+    // If the type has no codegen bits, no need to store it.
+    const inst_ty = self.typeOf(ref);
+    if (!inst_ty.hasRuntimeBits(zcu))
+        return .none;
+
+    return if (ref.toIndex()) |inst|
+        self.inst_map.get(inst).?
+    else mcv: {
+        const ip_index = ref.toInterned().?;
+        const gop = try self.const_map.getOrPut(self.gpa, ip_index);
+        if (!gop.found_existing) gop.value_ptr.* = try self.genTypedValue(Value.fromInterned(ip_index));
+        break :mcv gop.value_ptr.*;
+    };
+}
+
+fn genTypedValue(self: *Self, val: Value) InnerError!MCValue {
+    const zcu = self.bin_file.comp.module.?;
+    const result = try codegen.genTypedValue(
+        self.bin_file,
+        self.src_loc,
+        val,
+        zcu.funcOwnerDeclIndex(self.func_index),
+    );
+    const mcv: MCValue = switch (result) {
+        .mcv => |mcv| switch (mcv) {
+            .none => .none,
+            .undef => .undef,
+            .immediate => |imm| .{ .immediate = imm },
+            .memory, .load_symbol, .load_got, .load_direct, .load_tlv => {
+                return self.fail("TODO: genTypedValue {s}", .{@tagName(mcv)});
+            },
+        },
+        .fail => |msg| {
+            self.err_msg = msg;
+            return error.CodegenFail;
+        },
+    };
+    return mcv;
+}
+
+// Instructions
+
+fn airAlloc(self: *Self, inst: Air.Inst.Index) !void {
+    return self.finishAir(inst, try self.allocMemPtr(inst), .{ .none, .none, .none });
+}
+
+fn airStore(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
+    if (safety) {
+        // TODO if the value is undef, write 0xaa bytes to dest
+    } else {
+        // TODO if the value is undef, don't lower this instruction
+    }
+    const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
+    const ptr = try self.resolveInst(bin_op.lhs);
+    const value = try self.resolveInst(bin_op.rhs);
+    const ptr_ty = self.typeOf(bin_op.lhs);
+    const value_ty = self.typeOf(bin_op.rhs);
+
+    try self.store(ptr, value, ptr_ty, value_ty);
+
+    return self.finishAir(inst, .none, .{ bin_op.lhs, bin_op.rhs, .none });
+}
+
+/// Loads `value` into the "payload" of `pointer`.
+fn store(self: *Self, ptr_mcv: MCValue, src_mcv: MCValue, ptr_ty: Type, src_ty: Type) !void {
+    _ = ptr_ty; // autofix
+
+    switch (ptr_mcv) {
+        .none,
+        .undef,
+        .unreach,
+        => unreachable,
+
+        .immediate,
+        .register,
+        .frame_pointer_offset,
+        => try self.genCopy(src_ty, ptr_mcv.deref(), src_mcv),
+
+        .stack_value => return self.fail("TODO implement store for {s}", .{@tagName(ptr_mcv)}),
+    }
+}
+
+/// Sets the value without any modifications to register allocation metadata or stack allocation metadata.
+fn genCopy(self: *Self, ty: Type, dst_mcv: MCValue, src_mcv: MCValue) !void {
+    const zcu = self.bin_file.comp.module.?;
+    _ = zcu; // autofix
+
+    // There isn't anything to store
+    if (dst_mcv == .none) return;
+
+    if (!dst_mcv.isMutable()) {
+        // panic so we can see the trace
+        return self.fail("tried to genCopy immutable: {s}", .{@tagName(dst_mcv)});
+    }
+
+    switch (dst_mcv) {
+        .stack_value => |off| return self.genSetStack(ty, off, src_mcv),
+        else => return self.fail("TODO: genCopy to {s} from {s}", .{ @tagName(dst_mcv), @tagName(src_mcv) }),
+    }
+}
+
+fn genSetStack(
+    self: *Self,
+    ty: Type,
+    fpo: FramePointerOffset,
+    src_mcv: MCValue,
+) InnerError!void {
+    const zcu = self.bin_file.comp.module.?;
+    const abi_size: u32 = @intCast(ty.abiSize(zcu));
+
+    switch (src_mcv) {
+        .none => return,
+        .undef => {
+            if (!self.wantSafety()) return;
+            try self.genSetStack(ty, fpo, .{ .immediate = 0xaaaaaaaaaaaaaaaa });
+        },
+        .immediate,
+        => {
+            switch (abi_size) {
+                1, 2, 4 => {
+                    _ = try self.addInst(.{
+                        .tag = .store_from_immediate,
+                        .data = .{
+                            .extra = try self.addExtra(Mir.Inst.Data.StoreFromImmediate{
+                                .immediate = @intCast(src_mcv.immediate),
+                                .rest = .{
+                                    .dst_reg = .r10,
+                                    .offset = fpo.offset(),
+                                    .size = switch (abi_size) {
+                                        1 => .b,
+                                        2 => .hw,
+                                        4 => .w,
+                                        else => unreachable,
+                                    },
+                                },
+                            }),
+                        },
+                    });
+                },
+                8 => return self.fail("TODO 64-bit immediates", .{}),
+                else => unreachable, // immediate can hold a max of 8 bytes
+            }
+        },
+        .register => |reg| {
+            switch (abi_size) {
+                1, 2, 4, 8 => {
+                    _ = try self.addInst(.{
+                        .tag = .store_from_register,
+                        .data = .{
+                            .mov_with_offset = .{
+                                .dst_reg = .r10,
+                                .src_reg = reg,
+                                .offset = fpo.offset(),
+                                .size = switch (abi_size) {
+                                    1 => .b,
+                                    2 => .hw,
+                                    4 => .w,
+                                    8 => .dw,
+                                    else => unreachable,
+                                },
+                            },
+                        },
+                    });
+                },
+                else => unreachable, // register can hold a max of 8 bytes
+            }
+        },
+        else => return self.fail("TODO: genSetStack {s}", .{@tagName(src_mcv)}),
+    }
+}
+
+/// Allocates a register from the general purpose set and returns the Register and the Lock.
+///
+/// Up to the user to unlock the register later.
+fn allocReg(self: *Self) !struct { Register, RegisterLock } {
+    const reg = try self.register_manager.allocReg(null, gp);
+    const lock = self.register_manager.lockRegAssumeUnused(reg);
+    return .{ reg, lock };
+}
+
+/// TODO support scope overrides. Also note this logic is duplicated with `Module.wantSafety`.
+fn wantSafety(self: *Self) bool {
+    return switch (self.bin_file.comp.root_mod.optimize_mode) {
+        .Debug => true,
+        .ReleaseSafe => true,
+        .ReleaseFast => false,
+        .ReleaseSmall => false,
+    };
+}
+
+pub fn spillInstruction(self: *Self, reg: Register, inst: Air.Inst.Index) !void {
+    _ = reg; // autofix
+    _ = inst; // autofix
+    return self.fail("TODO spillInstruction", .{});
 }
