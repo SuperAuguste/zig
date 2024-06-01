@@ -48,6 +48,7 @@ err_msg: ?*ErrorMsg,
 src_loc: Module.SrcLoc,
 ip: *const InternPool,
 func_index: InternPool.Index,
+fn_type: Type,
 
 frame_pointer_offset: FramePointerOffset = @enumFromInt(0),
 
@@ -77,6 +78,8 @@ const MCValue = union(enum) {
     /// Offset from frame pointer (r10), derefed.
     stack_value: FramePointerOffset,
 
+    air_ref: Air.Inst.Ref,
+
     fn isMutable(mcv: MCValue) bool {
         return switch (mcv) {
             .none, .unreach => unreachable,
@@ -84,6 +87,7 @@ const MCValue = union(enum) {
             .undef,
             .immediate,
             .frame_pointer_offset,
+            .air_ref,
             => false,
 
             .register,
@@ -98,6 +102,7 @@ const MCValue = union(enum) {
             .unreach,
             .undef,
             .stack_value,
+            .air_ref,
             => unreachable, // not a pointer
 
             .immediate, .register => @panic("TODO"),
@@ -126,8 +131,7 @@ pub fn generate(
     const func = zcu.funcInfo(func_index);
     const fn_owner_decl = zcu.declPtr(func.owner_decl);
     std.debug.assert(fn_owner_decl.has_tv);
-    // const fn_type = fn_owner_decl.typeOf(zcu);
-    // _ = fn_type; // autofix
+    const fn_type = fn_owner_decl.typeOf(zcu);
     const namespace = zcu.namespacePtr(fn_owner_decl.src_namespace);
     // const target = &namespace.file_scope.mod.resolved_target.result;
     // _ = target; // autofix
@@ -143,6 +147,7 @@ pub fn generate(
         .src_loc = src_loc,
         .ip = ip,
         .func_index = func_index,
+        .fn_type = fn_type,
     };
 
     // try code.appendSlice(&std.mem.toBytes(Encoding.Instruction{
@@ -326,8 +331,8 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .loop            => return self.fail("TODO: loop", .{}),
             .not             => return self.fail("TODO: not", .{}),
             .int_from_ptr    => return self.fail("TODO: int_from_ptr", .{}),
-            .ret             => return self.fail("TODO: ret", .{}),
-            .ret_safe        => return self.fail("TODO: ret_safe", .{}),
+            .ret             => try self.airRet(inst, false),
+            .ret_safe        => try self.airRet(inst, true),
             .ret_load        => return self.fail("TODO: ret_load", .{}),
             .store           => try self.airStore(inst, false),
             .store_safe      => try self.airStore(inst, true),
@@ -636,8 +641,6 @@ fn airStore(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
 
 /// Loads `value` into the "payload" of `pointer`.
 fn store(self: *Self, ptr_mcv: MCValue, src_mcv: MCValue, ptr_ty: Type, src_ty: Type) !void {
-    _ = ptr_ty; // autofix
-
     switch (ptr_mcv) {
         .none,
         .undef,
@@ -648,6 +651,8 @@ fn store(self: *Self, ptr_mcv: MCValue, src_mcv: MCValue, ptr_ty: Type, src_ty: 
         .register,
         .frame_pointer_offset,
         => try self.genCopy(src_ty, ptr_mcv.deref(), src_mcv),
+
+        .air_ref => |ptr_ref| try self.store(try self.resolveInst(ptr_ref), src_mcv, ptr_ty, src_ty),
 
         .stack_value => return self.fail("TODO implement store for {s}", .{@tagName(ptr_mcv)}),
     }
@@ -667,8 +672,51 @@ fn genCopy(self: *Self, ty: Type, dst_mcv: MCValue, src_mcv: MCValue) !void {
     }
 
     switch (dst_mcv) {
+        .register => |reg| return self.genSetReg(ty, reg, src_mcv),
         .stack_value => |off| return self.genSetStack(ty, off, src_mcv),
         else => return self.fail("TODO: genCopy to {s} from {s}", .{ @tagName(dst_mcv), @tagName(src_mcv) }),
+    }
+}
+
+/// Sets the value of `src_mcv` into `reg`. Assumes you have a lock on it.
+fn genSetReg(self: *Self, ty: Type, reg: Register, src_mcv: MCValue) InnerError!void {
+    const zcu = self.bin_file.comp.module.?;
+    const abi_size: u32 = @intCast(ty.abiSize(zcu));
+
+    if (abi_size > 8) return self.fail("tried to set reg with size {}", .{abi_size});
+
+    switch (src_mcv) {
+        .unreach, .none => return, // Nothing to do.
+        .undef => {
+            if (!self.wantSafety())
+                return; // The already existing value will do just fine.
+            // Write the debug undefined value.
+            return self.genSetReg(ty, reg, .{ .immediate = 0xaaaaaaaaaaaaaaaa });
+        },
+        .immediate => |unsigned_x| {
+            _ = unsigned_x; // autofix
+            // TODO: better immediate handling
+
+            switch (abi_size) {
+                1, 2, 4 => {
+                    _ = try self.addInst(.{
+                        .tag = .alu64_mov_imm32,
+                        .data = .{
+                            .extra = try self.addExtra(Mir.Inst.Data.DstImmediate{
+                                .immediate = @intCast(src_mcv.immediate),
+                                .rest = .{
+                                    .dst_reg = reg,
+                                },
+                            }),
+                        },
+                    });
+                },
+                8 => return self.fail("TODO 64-bit immediates", .{}),
+                else => unreachable, // immediate can hold a max of 8 bytes
+            }
+        },
+        .air_ref => |ref| try self.genSetReg(ty, reg, try self.resolveInst(ref)),
+        else => return self.fail("TODO: genSetReg {s}", .{@tagName(src_mcv)}),
     }
 }
 
@@ -765,4 +813,24 @@ pub fn spillInstruction(self: *Self, reg: Register, inst: Air.Inst.Index) !void 
     _ = reg; // autofix
     _ = inst; // autofix
     return self.fail("TODO spillInstruction", .{});
+}
+
+fn airRet(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
+    const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
+    _ = bin_op; // autofix
+
+    const zcu = self.bin_file.comp.module.?;
+    const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
+
+    if (safety) {
+        // safe
+    } else {
+        // not safe
+    }
+
+    const ret_ty = self.fn_type.fnReturnType(zcu);
+    try self.genCopy(ret_ty, .{ .register = .r0 }, .{ .air_ref = un_op });
+
+    _ = try self.addInst(.{ .tag = .exit, .data = .{ .none = {} } });
+    try self.finishAir(inst, .unreach, .{ un_op, .none, .none });
 }

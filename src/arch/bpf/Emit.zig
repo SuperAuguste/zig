@@ -66,6 +66,46 @@ pub fn emitMir(emit: *Emit) InnerError!void {
                     },
                 });
             },
+            .exit => {
+                try emit.emitInstruction(.{
+                    .opcode = .{
+                        .class = .jmp,
+                        .rest = .{
+                            .jump = .{
+                                .source = .immediate,
+                                .operation = .exit,
+                            },
+                        },
+                    },
+                    .dst_reg = .r0,
+                    .src_reg = .r0,
+                    .offset = 0,
+                    .immediate = .{
+                        .imm = 0,
+                    },
+                });
+            },
+            .alu64_mov_imm32 => {
+                const di = emit.mir.getExtra(Mir.Inst.Data.DstImmediate, data.extra);
+
+                try emit.emitInstruction(.{
+                    .opcode = .{
+                        .class = .alu64,
+                        .rest = .{
+                            .alu = .{
+                                .source = .immediate_or_to_le,
+                                .operation = .mov,
+                            },
+                        },
+                    },
+                    .dst_reg = di.rest.dst_reg,
+                    .src_reg = .r0,
+                    .offset = 0,
+                    .immediate = .{
+                        .imm = di.immediate,
+                    },
+                });
+            },
             else => return emit.fail("mir lowering not implemented: {s}", .{@tagName(tag)}),
         }
     }

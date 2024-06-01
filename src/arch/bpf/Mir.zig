@@ -183,6 +183,16 @@ pub const Inst = struct {
     };
 
     pub const Data = union {
+        /// In extra.
+        pub const DstImmediate = struct {
+            immediate: u32,
+            rest: packed struct(u32) {
+                dst_reg: Register,
+
+                padding: u28 = 0,
+            },
+        };
+
         pub const ByteSwapWidth = enum(u2) {
             @"16",
             @"32",
@@ -210,6 +220,7 @@ pub const Inst = struct {
             },
         };
 
+        none: void,
         imm32: u32,
         src_reg: Register,
         byte_swap_width: ByteSwapWidth,
