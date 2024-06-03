@@ -183,6 +183,11 @@ pub const Inst = struct {
     };
 
     pub const Data = union {
+        pub const DstSrc = struct {
+            dst_reg: Register,
+            src_reg: Register,
+        };
+
         /// In extra.
         pub const DstImmediate = struct {
             immediate: u32,
@@ -193,10 +198,16 @@ pub const Inst = struct {
             },
         };
 
-        pub const ByteSwapWidth = enum(u2) {
-            @"16",
-            @"32",
-            @"64",
+        pub const ByteSwap = struct {
+            pub const Width = enum(u2) {
+                @"16",
+                @"32",
+                @"64",
+            };
+
+            dst_reg: Register,
+            src_reg: Register,
+            width: Width,
         };
 
         pub const MovWithOffset = packed struct(u32) {
@@ -221,9 +232,8 @@ pub const Inst = struct {
         };
 
         none: void,
-        imm32: u32,
-        src_reg: Register,
-        byte_swap_width: ByteSwapWidth,
+        dst_src: DstSrc,
+        byte_swap: ByteSwap,
         mov_with_offset: MovWithOffset,
         extra: u32,
     };

@@ -85,8 +85,47 @@ pub fn emitMir(emit: *Emit) InnerError!void {
                     },
                 });
             },
-            .alu64_mov_imm32 => {
+            inline .alu64_add_imm32,
+            .alu64_sub_imm32,
+            .alu64_mul_imm32,
+            .alu64_div_imm32,
+            .alu64_sdiv_imm32,
+            .alu64_or_imm32,
+            .alu64_and_imm32,
+            .alu64_lsh_imm32,
+            .alu64_rsh_imm32,
+            .alu64_neg_imm32,
+            .alu64_mod_imm32,
+            .alu64_smod_imm32,
+            .alu64_xor_imm32,
+            .alu64_mov_imm32,
+            .alu64_movsx8_imm32,
+            .alu64_movsx16_imm32,
+            .alu64_movsx32_imm32,
+            .alu64_arsh_imm32,
+            => |alu64_imm_tag| {
                 const di = emit.mir.getExtra(Mir.Inst.Data.DstImmediate, data.extra);
+
+                const operation =
+                    comptime switch (alu64_imm_tag) {
+                    .alu64_sdiv_imm32 => .div,
+                    .alu64_smod_imm32 => .mod,
+                    .alu64_movsx8_imm32, .alu64_movsx16_imm32, .alu64_movsx32_imm32 => .mov,
+                    else => blk: {
+                        var tag_iterator = std.mem.split(u8, @tagName(alu64_imm_tag), "_");
+                        _ = tag_iterator.next().?;
+                        break :blk @field(Instruction.Opcode.Alu.Operation, tag_iterator.next().?);
+                    },
+                };
+
+                const offset: i16 =
+                    comptime switch (alu64_imm_tag) {
+                    .alu64_sdiv_imm32, .alu64_smod_imm32 => 1,
+                    .alu64_movsx8_imm32 => 8,
+                    .alu64_movsx16_imm32 => 16,
+                    .alu64_movsx32_imm32 => 32,
+                    else => 0,
+                };
 
                 try emit.emitInstruction(.{
                     .opcode = .{
@@ -94,15 +133,75 @@ pub fn emitMir(emit: *Emit) InnerError!void {
                         .rest = .{
                             .alu = .{
                                 .source = .immediate_or_to_le,
-                                .operation = .mov,
+                                .operation = operation,
                             },
                         },
                     },
                     .dst_reg = di.rest.dst_reg,
                     .src_reg = .r0,
-                    .offset = 0,
+                    .offset = offset,
                     .immediate = .{
                         .imm = di.immediate,
+                    },
+                });
+            },
+            inline .alu64_add_src_reg,
+            .alu64_sub_src_reg,
+            .alu64_mul_src_reg,
+            .alu64_div_src_reg,
+            .alu64_sdiv_src_reg,
+            .alu64_or_src_reg,
+            .alu64_and_src_reg,
+            .alu64_lsh_src_reg,
+            .alu64_rsh_src_reg,
+            .alu64_neg_src_reg,
+            .alu64_mod_src_reg,
+            .alu64_smod_src_reg,
+            .alu64_xor_src_reg,
+            .alu64_mov_src_reg,
+            .alu64_movsx8_src_reg,
+            .alu64_movsx16_src_reg,
+            .alu64_movsx32_src_reg,
+            .alu64_arsh_src_reg,
+            => |alu64_reg_tag| {
+                const ds = data.dst_src;
+
+                const operation =
+                    comptime switch (alu64_reg_tag) {
+                    .alu64_sdiv_src_reg => .div,
+                    .alu64_smod_src_reg => .mod,
+                    .alu64_movsx8_src_reg, .alu64_movsx16_src_reg, .alu64_movsx32_src_reg => .mov,
+                    else => blk: {
+                        var tag_iterator = std.mem.split(u8, @tagName(alu64_reg_tag), "_");
+                        _ = tag_iterator.next().?;
+                        break :blk @field(Instruction.Opcode.Alu.Operation, tag_iterator.next().?);
+                    },
+                };
+
+                const offset: i16 =
+                    comptime switch (alu64_reg_tag) {
+                    .alu64_sdiv_src_reg, .alu64_smod_src_reg => 1,
+                    .alu64_movsx8_src_reg => 8,
+                    .alu64_movsx16_src_reg => 16,
+                    .alu64_movsx32_src_reg => 32,
+                    else => 0,
+                };
+
+                try emit.emitInstruction(.{
+                    .opcode = .{
+                        .class = .alu64,
+                        .rest = .{
+                            .alu = .{
+                                .source = .src_reg_or_to_be,
+                                .operation = operation,
+                            },
+                        },
+                    },
+                    .dst_reg = ds.dst_reg,
+                    .src_reg = ds.src_reg,
+                    .offset = offset,
+                    .immediate = .{
+                        .imm = 0,
                     },
                 });
             },

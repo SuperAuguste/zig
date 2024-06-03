@@ -303,7 +303,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .alloc           => try self.airAlloc(inst),
             .ret_ptr         => return self.fail("TODO: ret_ptr", .{}),
             .arg             => return self.fail("TODO: arg", .{}),
-            .assembly        => return self.fail("TODO: assembly", .{}),
+            .assembly        => return self.airAsm(inst),
             .bitcast         => return self.fail("TODO: bitcast", .{}),
             .block           => return self.fail("TODO: block", .{}),
             .br              => return self.fail("TODO: br", .{}),
@@ -833,4 +833,156 @@ fn airRet(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
 
     _ = try self.addInst(.{ .tag = .exit, .data = .{ .none = {} } });
     try self.finishAir(inst, .unreach, .{ un_op, .none, .none });
+}
+
+fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
+    const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
+    const extra = self.air.extraData(Air.Asm, ty_pl.payload);
+    const is_volatile = @as(u1, @truncate(extra.data.flags >> 31)) != 0;
+    const clobbers_len: u31 = @truncate(extra.data.flags);
+    var extra_i: usize = extra.end;
+    const outputs: []const Air.Inst.Ref =
+        @ptrCast(self.air.extra[extra_i..][0..extra.data.outputs_len]);
+    extra_i += outputs.len;
+    const inputs: []const Air.Inst.Ref = @ptrCast(self.air.extra[extra_i..][0..extra.data.inputs_len]);
+    extra_i += inputs.len;
+    const asm_source = std.mem.sliceAsBytes(self.air.extra[extra_i..])[0..extra.data.source_len];
+
+    if (clobbers_len != 0 or outputs.len != 0 or inputs.len != 0) {
+        return self.fail("TODO support clobbers/outputs/inputs for asm", .{});
+    }
+
+    if (!is_volatile and self.liveness.isUnused(inst)) return self.finishAirResult(inst, .unreach);
+
+    // TODO: less finnicky parsing. error handling.
+    // TODO: labels?
+    // TODO: support 32bit operations
+
+    const Lexer = struct {
+        cg: *Self,
+        text: []const u8,
+        index: usize = 0,
+
+        fn fail(lexer: *@This(), comptime format: []const u8, args: anytype) InnerError {
+            return lexer.cg.fail(format, args);
+        }
+
+        fn skipWhitespace(lexer: *@This()) void {
+            while (std.ascii.isWhitespace(lexer.text[lexer.index])) lexer.index += 1;
+        }
+
+        fn lexRegister(lexer: *@This()) ?Register {
+            if (lexer.text[lexer.index] != 'r') return null;
+            lexer.index += 1;
+
+            const len: usize = if (lexer.text[lexer.index + 1] == '0') 2 else 1;
+
+            const register: Register = @enumFromInt(std.fmt.parseInt(u4, lexer.text[lexer.index..][0..len], 10) catch return null);
+            lexer.index += len;
+            return register;
+        }
+
+        const BinaryOp = enum {
+            add,
+            sub,
+            mul,
+            div,
+            @"or",
+            @"and",
+            lsh,
+            rsh,
+            mod,
+            xor,
+            mov,
+            arsh,
+            neg,
+            sdiv,
+            smod,
+            movsx8,
+            movsx16,
+            movsx32,
+
+            const simple_operators = std.StaticStringMap(BinaryOp).initComptime(.{
+                .{ "+=", .add },
+                .{ "-=", .sub },
+                .{ "*=", .mul },
+                .{ "/=", .div },
+                .{ "|=", .@"or" },
+                .{ "&=", .@"and" },
+                .{ "<<=", .lsh },
+                .{ ">>=", .rsh },
+                .{ "%=", .mod },
+                .{ "^=", .xor },
+                .{ "=", .mov },
+                .{ "s>>=", .arsh },
+                .{ "s/=", .sdiv },
+                .{ "s%=", .smod },
+            });
+        };
+
+        fn lexBinaryOp(lexer: *@This()) !BinaryOp {
+            var end = lexer.index;
+            while (!std.ascii.isWhitespace(lexer.text[end])) {
+                end += 1;
+            }
+
+            if (BinaryOp.simple_operators.get(lexer.text[lexer.index..end])) |bin_op| {
+                lexer.index = end;
+                return bin_op;
+            }
+
+            return lexer.fail("failed to parse bin_op '{s}'", .{lexer.text[lexer.index..]});
+        }
+
+        fn lexImm32(lexer: *@This()) !u32 {
+            return std.fmt.parseInt(u32, lexer.text[lexer.index..], 10) catch return lexer.fail("failed to parse imm32 '{s}'", .{lexer.text[lexer.index..]});
+        }
+    };
+
+    var line_iterator = std.mem.split(u8, asm_source, "\n");
+
+    while (line_iterator.next()) |line| {
+        var lexer = Lexer{
+            .text = line,
+            .cg = self,
+        };
+
+        lexer.skipWhitespace();
+
+        if (lexer.lexRegister()) |dst_reg| {
+            lexer.skipWhitespace();
+            const bin_op = try lexer.lexBinaryOp();
+            lexer.skipWhitespace();
+
+            if (lexer.lexRegister()) |src_reg| {
+                _ = src_reg; // autofix
+                return self.fail("TODO reg bin_op reg", .{});
+            } else {
+                const imm32 = try lexer.lexImm32();
+
+                switch (bin_op) {
+                    inline else => |op| {
+                        _ = try self.addInst(.{
+                            .tag = @field(Mir.Inst.Tag, "alu64_" ++ @tagName(op) ++ "_imm32"),
+                            .data = .{
+                                .extra = try self.addExtra(Mir.Inst.Data.DstImmediate{
+                                    .immediate = imm32,
+                                    .rest = .{
+                                        .dst_reg = dst_reg,
+                                    },
+                                }),
+                            },
+                        });
+                    },
+                }
+            }
+        } else if (std.mem.eql(u8, line, "exit")) {
+            _ = try self.addInst(.{
+                .tag = .exit,
+                .data = .{ .none = {} },
+            });
+        }
+    }
+
+    try self.finishAirResult(inst, .none);
 }

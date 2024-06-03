@@ -15,6 +15,7 @@ pub const Register = enum(u4) {
 
 /// Unused fields must be zeroed.
 /// https://docs.kernel.org/bpf/standardization/instruction-set.html
+/// https://gcc.gnu.org/wiki/BPFBackEnd
 pub const Instruction = packed struct(u64) {
     pub const Class = enum(u3) {
         /// non-standard load
