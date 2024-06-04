@@ -22,6 +22,9 @@ const Type = @import("../../type.zig").Type;
 const Value = @import("../../Value.zig");
 const Emit = @import("Emit.zig");
 
+const Immediate32 = bits.Instruction.Immediate32;
+const Offset = bits.Instruction.Offset;
+
 /// General Purpose
 const gp = abi.RegisterClass.gp;
 /// Function Args
@@ -859,28 +862,8 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
     // TODO: support 32bit operations
 
     const Lexer = struct {
-        cg: *Self,
         text: []const u8,
         index: usize = 0,
-
-        fn fail(lexer: *@This(), comptime format: []const u8, args: anytype) InnerError {
-            return lexer.cg.fail(format, args);
-        }
-
-        fn skipWhitespace(lexer: *@This()) void {
-            while (std.ascii.isWhitespace(lexer.text[lexer.index])) lexer.index += 1;
-        }
-
-        fn lexRegister(lexer: *@This()) ?Register {
-            if (lexer.text[lexer.index] != 'r') return null;
-            lexer.index += 1;
-
-            const len: usize = if (lexer.text[lexer.index + 1] == '0') 2 else 1;
-
-            const register: Register = @enumFromInt(std.fmt.parseInt(u4, lexer.text[lexer.index..][0..len], 10) catch return null);
-            lexer.index += len;
-            return register;
-        }
 
         const BinaryOp = enum {
             add,
@@ -895,47 +878,143 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
             xor,
             mov,
             arsh,
-            neg,
             sdiv,
             smod,
             movsx8,
             movsx16,
             movsx32,
-
-            const simple_operators = std.StaticStringMap(BinaryOp).initComptime(.{
-                .{ "+=", .add },
-                .{ "-=", .sub },
-                .{ "*=", .mul },
-                .{ "/=", .div },
-                .{ "|=", .@"or" },
-                .{ "&=", .@"and" },
-                .{ "<<=", .lsh },
-                .{ ">>=", .rsh },
-                .{ "%=", .mod },
-                .{ "^=", .xor },
-                .{ "=", .mov },
-                .{ "s>>=", .arsh },
-                .{ "s/=", .sdiv },
-                .{ "s%=", .smod },
-            });
         };
 
-        fn lexBinaryOp(lexer: *@This()) !BinaryOp {
+        const Keyword = enum {
+            goto,
+            @"if",
+            call,
+            exit,
+            lock,
+        };
+
+        const Comparator = enum {
+            eq,
+            gt,
+            ge,
+            set,
+            ne,
+            sgt,
+            sge,
+            lt,
+            le,
+            slt,
+            sle,
+        };
+
+        const binary_ops = std.StaticStringMap(BinaryOp).initComptime(.{
+            .{ "+=", .add },
+            .{ "-=", .sub },
+            .{ "*=", .mul },
+            .{ "/=", .div },
+            .{ "|=", .@"or" },
+            .{ "&=", .@"and" },
+            .{ "<<=", .lsh },
+            .{ ">>=", .rsh },
+            .{ "%=", .mod },
+            .{ "^=", .xor },
+            .{ "=", .mov },
+            .{ "s>>=", .arsh },
+            .{ "s/=", .sdiv },
+            .{ "s%=", .smod },
+        });
+
+        const keywords = std.StaticStringMap(Keyword).initComptime(.{
+            .{ "goto", .goto },
+            .{ "if", .@"if" },
+            .{ "call", .call },
+            .{ "exit", .exit },
+            .{ "lock", .lock },
+        });
+
+        const comparators = std.StaticStringMap(Comparator).initComptime(.{
+            .{ "==", .eq },
+            .{ ">", .gt },
+            .{ ">=", .ge },
+            .{ "&", .set },
+            .{ "!=", .ne },
+            .{ "s>", .sgt },
+            .{ "s>=", .sge },
+            .{ "<", .lt },
+            .{ "<=", .le },
+            .{ "s<", .slt },
+            .{ "s<=", .sle },
+        });
+
+        fn skipWhitespace(lexer: *@This()) void {
+            while (lexer.index != lexer.text.len and std.ascii.isWhitespace(lexer.text[lexer.index])) lexer.index += 1;
+        }
+
+        fn untilNextWhitespaceOrEnd(lexer: *@This()) usize {
             var end = lexer.index;
-            while (!std.ascii.isWhitespace(lexer.text[end])) {
+            while (end != lexer.text.len and !std.ascii.isWhitespace(lexer.text[end])) {
                 end += 1;
             }
+            return end;
+        }
 
-            if (BinaryOp.simple_operators.get(lexer.text[lexer.index..end])) |bin_op| {
+        fn lexRegister(lexer: *@This()) ?Register {
+            if (lexer.text[lexer.index] != 'r') return null;
+            lexer.index += 1;
+            if (lexer.index >= lexer.text.len) return null;
+
+            const len: usize = if (lexer.index + 1 < lexer.text.len and lexer.text[lexer.index + 1] == '0') 2 else 1;
+
+            const register: Register = @enumFromInt(std.fmt.parseInt(u4, lexer.text[lexer.index..][0..len], 10) catch return null);
+            lexer.index += len;
+            return register;
+        }
+
+        fn lexBinaryOp(lexer: *@This()) ?BinaryOp {
+            const end = lexer.untilNextWhitespaceOrEnd();
+
+            if (binary_ops.get(lexer.text[lexer.index..end])) |bin_op| {
                 lexer.index = end;
                 return bin_op;
             }
 
-            return lexer.fail("failed to parse bin_op '{s}'", .{lexer.text[lexer.index..]});
+            return null;
         }
 
-        fn lexImm32(lexer: *@This()) !u32 {
-            return std.fmt.parseInt(u32, lexer.text[lexer.index..], 10) catch return lexer.fail("failed to parse imm32 '{s}'", .{lexer.text[lexer.index..]});
+        fn lexImm32(lexer: *@This()) ?u32 {
+            const end = lexer.untilNextWhitespaceOrEnd();
+            const imm32 = std.fmt.parseInt(u32, lexer.text[lexer.index..end], 10) catch return null;
+            lexer.index = end;
+            return imm32;
+        }
+
+        fn lexOffset(lexer: *@This()) ?Offset {
+            const end = lexer.untilNextWhitespaceOrEnd();
+            const offset = std.fmt.parseInt(i16, lexer.text[lexer.index..end], 10) catch return null;
+            lexer.index = end;
+            return offset;
+        }
+
+        fn lexKeyword(lexer: *@This()) ?Keyword {
+            const end = lexer.untilNextWhitespaceOrEnd();
+
+            if (keywords.get(lexer.text[lexer.index..end])) |kw| {
+                lexer.index = end;
+                return kw;
+            }
+
+            return null;
+        }
+
+        fn lexComparator(lexer: *@This()) ?Comparator {
+            const end = lexer.untilNextWhitespaceOrEnd();
+
+            if (comparators.get(lexer.text[lexer.index..end])) |kw| {
+                lexer.index = end;
+                return kw;
+            }
+
+            return null;
         }
     };
 
@@ -944,22 +1023,28 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
     while (line_iterator.next()) |line| {
         var lexer = Lexer{
             .text = line,
-            .cg = self,
         };
 
         lexer.skipWhitespace();
 
         if (lexer.lexRegister()) |dst_reg| {
             lexer.skipWhitespace();
-            const bin_op = try lexer.lexBinaryOp();
+            const bin_op = lexer.lexBinaryOp() orelse return self.fail("expected binary operator", .{});
             lexer.skipWhitespace();
 
             if (lexer.lexRegister()) |src_reg| {
-                _ = src_reg; // autofix
-                return self.fail("TODO reg bin_op reg", .{});
-            } else {
-                const imm32 = try lexer.lexImm32();
-
+                switch (bin_op) {
+                    inline else => |op| {
+                        _ = try self.addInst(.{
+                            .tag = @field(Mir.Inst.Tag, "alu64_" ++ @tagName(op) ++ "_src_reg"),
+                            .data = .{ .dst_src = .{
+                                .dst_reg = dst_reg,
+                                .src_reg = src_reg,
+                            } },
+                        });
+                    },
+                }
+            } else if (lexer.lexImm32()) |imm32| {
                 switch (bin_op) {
                     inline else => |op| {
                         _ = try self.addInst(.{
@@ -975,13 +1060,79 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
                         });
                     },
                 }
+            } else return self.fail("expected register or imm32", .{});
+        } else if (lexer.lexKeyword()) |kw| {
+            switch (kw) {
+                .goto => {
+                    lexer.skipWhitespace();
+
+                    const offset = lexer.lexImm32() orelse return self.fail("expected 16-bit offset or imm32", .{});
+
+                    _ = try self.addInst(.{
+                        .tag = .ja,
+                        .data = .{ .immediate = offset },
+                    });
+                },
+                .@"if" => {
+                    lexer.skipWhitespace();
+                    const dst_reg = lexer.lexRegister() orelse return self.fail("expected register", .{});
+                    lexer.skipWhitespace();
+                    const comparator = lexer.lexComparator() orelse return self.fail("expected comparator", .{});
+                    lexer.skipWhitespace();
+
+                    if (lexer.lexImm32()) |imm32| {
+                        lexer.skipWhitespace();
+                        if (lexer.lexKeyword() != .goto) return self.fail("expected goto", .{});
+                        lexer.skipWhitespace();
+                        const offset = lexer.lexOffset() orelse return self.fail("expected offset", .{});
+
+                        switch (comparator) {
+                            inline else => |comp| {
+                                _ = try self.addInst(.{
+                                    .tag = @field(Mir.Inst.Tag, "jmp64_j" ++ @tagName(comp) ++ "_imm32"),
+                                    .data = .{
+                                        .extra = try self.addExtra(Mir.Inst.Data.DstImmediateOffset{
+                                            .immediate = imm32,
+                                            .rest = .{
+                                                .dst_reg = dst_reg,
+                                                .offset = offset,
+                                            },
+                                        }),
+                                    },
+                                });
+                            },
+                        }
+                    } else if (lexer.lexRegister()) |src_reg| {
+                        lexer.skipWhitespace();
+                        if (lexer.lexKeyword() != .goto) return self.fail("expected goto", .{});
+                        lexer.skipWhitespace();
+                        const offset = lexer.lexOffset() orelse return self.fail("expected offset", .{});
+
+                        switch (comparator) {
+                            inline else => |comp| {
+                                _ = try self.addInst(.{
+                                    .tag = @field(Mir.Inst.Tag, "jmp64_j" ++ @tagName(comp) ++ "_src_reg"),
+                                    .data = .{
+                                        .dst_src_offset = .{
+                                            .dst_reg = dst_reg,
+                                            .src_reg = src_reg,
+                                            .offset = offset,
+                                        },
+                                    },
+                                });
+                            },
+                        }
+                    } else {}
+                },
+                .exit => {
+                    _ = try self.addInst(.{
+                        .tag = .exit,
+                        .data = .{ .none = {} },
+                    });
+                },
+                else => return self.fail("TODO implement more asm kws", .{}),
             }
-        } else if (std.mem.eql(u8, line, "exit")) {
-            _ = try self.addInst(.{
-                .tag = .exit,
-                .data = .{ .none = {} },
-            });
-        }
+        } else return self.fail("expected register or keyword", .{});
     }
 
     try self.finishAirResult(inst, .none);

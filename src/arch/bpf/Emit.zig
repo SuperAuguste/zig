@@ -94,7 +94,6 @@ pub fn emitMir(emit: *Emit) InnerError!void {
             .alu64_and_imm32,
             .alu64_lsh_imm32,
             .alu64_rsh_imm32,
-            .alu64_neg_imm32,
             .alu64_mod_imm32,
             .alu64_smod_imm32,
             .alu64_xor_imm32,
@@ -154,7 +153,6 @@ pub fn emitMir(emit: *Emit) InnerError!void {
             .alu64_and_src_reg,
             .alu64_lsh_src_reg,
             .alu64_rsh_src_reg,
-            .alu64_neg_src_reg,
             .alu64_mod_src_reg,
             .alu64_smod_src_reg,
             .alu64_xor_src_reg,
@@ -200,6 +198,119 @@ pub fn emitMir(emit: *Emit) InnerError!void {
                     .dst_reg = ds.dst_reg,
                     .src_reg = ds.src_reg,
                     .offset = offset,
+                    .immediate = .{
+                        .imm = 0,
+                    },
+                });
+            },
+            .ja => {
+                if (data.immediate <= std.math.maxInt(u16)) {
+                    try emit.emitInstruction(.{
+                        .opcode = .{
+                            .class = .jmp,
+                            .rest = .{
+                                .jump = .{
+                                    .source = .immediate,
+                                    .operation = .ja,
+                                },
+                            },
+                        },
+                        .dst_reg = .r0,
+                        .src_reg = .r0,
+                        .offset = @intCast(data.immediate),
+                        .immediate = .{
+                            .imm = 0,
+                        },
+                    });
+                } else {
+                    try emit.emitInstruction(.{
+                        .opcode = .{
+                            .class = .jmp32,
+                            .rest = .{
+                                .jump = .{
+                                    .source = .immediate,
+                                    .operation = .ja,
+                                },
+                            },
+                        },
+                        .dst_reg = .r0,
+                        .src_reg = .r0,
+                        .offset = 0,
+                        .immediate = .{
+                            .imm = data.immediate,
+                        },
+                    });
+                }
+            },
+            inline .jmp64_jeq_imm32,
+            .jmp64_jgt_imm32,
+            .jmp64_jge_imm32,
+            .jmp64_jset_imm32,
+            .jmp64_jne_imm32,
+            .jmp64_jsgt_imm32,
+            .jmp64_jsge_imm32,
+            .jmp64_jlt_imm32,
+            .jmp64_jle_imm32,
+            .jmp64_jslt_imm32,
+            .jmp64_jsle_imm32,
+            => |jmp64_imm_tag| {
+                const dio = emit.mir.getExtra(Mir.Inst.Data.DstImmediateOffset, data.extra);
+
+                const operation = comptime blk: {
+                    var tag_iterator = std.mem.split(u8, @tagName(jmp64_imm_tag), "_");
+                    _ = tag_iterator.next().?;
+                    break :blk @field(Instruction.Opcode.Jump.Operation, tag_iterator.next().?);
+                };
+
+                try emit.emitInstruction(.{
+                    .opcode = .{
+                        .class = .jmp,
+                        .rest = .{
+                            .jump = .{
+                                .source = .immediate,
+                                .operation = operation,
+                            },
+                        },
+                    },
+                    .dst_reg = dio.rest.dst_reg,
+                    .src_reg = .r0,
+                    .offset = dio.rest.offset,
+                    .immediate = .{
+                        .imm = dio.immediate,
+                    },
+                });
+            },
+            inline .jmp64_jeq_src_reg,
+            .jmp64_jgt_src_reg,
+            .jmp64_jge_src_reg,
+            .jmp64_jset_src_reg,
+            .jmp64_jne_src_reg,
+            .jmp64_jsgt_src_reg,
+            .jmp64_jsge_src_reg,
+            .jmp64_jlt_src_reg,
+            .jmp64_jle_src_reg,
+            .jmp64_jslt_src_reg,
+            .jmp64_jsle_src_reg,
+            => |jmp64_imm_tag| {
+                const operation = comptime blk: {
+                    var tag_iterator = std.mem.split(u8, @tagName(jmp64_imm_tag), "_");
+                    _ = tag_iterator.next().?;
+                    break :blk @field(Instruction.Opcode.Jump.Operation, tag_iterator.next().?);
+                };
+
+                try emit.emitInstruction(.{
+                    .opcode = .{
+                        .class = .jmp,
+                        .rest = .{
+                            .jump = .{
+                                .source = .src_reg,
+                                .operation = operation,
+                            },
+                        },
+                    },
+                    .dst_reg = data.dst_src_offset.dst_reg,
+                    .src_reg = data.dst_src_offset.src_reg,
+                    .offset = data.dst_src_offset.offset,
                     .immediate = .{
                         .imm = 0,
                     },

@@ -1,8 +1,12 @@
 const Mir = @This();
 
 const std = @import("std");
-const Register = @import("bits.zig").Register;
 const Size = @import("bits.zig").Instruction.Opcode.LoadStore.Size;
+
+const bits = @import("bits.zig");
+const Register = bits.Register;
+const Immediate32 = bits.Instruction.Immediate32;
+const Offset = bits.Instruction.Offset;
 
 instructions: std.MultiArrayList(Inst).Slice,
 extra: []const u32,
@@ -57,10 +61,8 @@ pub const Inst = struct {
         alu32_rsh_src_reg,
         alu64_rsh_imm32,
         alu64_rsh_src_reg,
-        alu32_neg_imm32,
-        alu32_neg_src_reg,
-        alu64_neg_imm32,
-        alu64_neg_src_reg,
+        alu32_neg,
+        alu64_neg,
         alu32_mod_imm32,
         alu32_mod_src_reg,
         alu64_mod_imm32,
@@ -104,8 +106,9 @@ pub const Inst = struct {
 
         // Jump
 
-        ja_offset,
-        ja_imm32,
+        /// Emitted as either an offset or imm32 jump depending
+        /// on the offset size. Thus, its data is an `immediate`.
+        ja,
         call_static_id,
         call_imm32,
         call_btf_id,
@@ -190,7 +193,7 @@ pub const Inst = struct {
 
         /// In extra.
         pub const DstImmediate = struct {
-            immediate: u32,
+            immediate: Immediate32,
             rest: packed struct(u32) {
                 dst_reg: Register,
 
@@ -210,10 +213,27 @@ pub const Inst = struct {
             width: Width,
         };
 
+        /// In extra.
+        pub const DstImmediateOffset = struct {
+            immediate: Immediate32,
+            rest: packed struct(u32) {
+                dst_reg: Register,
+                offset: Offset,
+
+                padding: u12 = 0,
+            },
+        };
+
+        pub const DstSrcOffset = struct {
+            dst_reg: Register,
+            src_reg: Register,
+            offset: Offset,
+        };
+
         pub const MovWithOffset = packed struct(u32) {
             dst_reg: Register,
             src_reg: Register,
-            offset: i16,
+            offset: Offset,
             size: Size,
 
             padding: u6 = 0,
@@ -221,10 +241,10 @@ pub const Inst = struct {
 
         /// In extra.
         pub const StoreFromImmediate = struct {
-            immediate: u32,
+            immediate: Immediate32,
             rest: packed struct(u32) {
                 dst_reg: Register,
-                offset: i16,
+                offset: Offset,
                 size: Size,
 
                 padding: u10 = 0,
@@ -234,6 +254,8 @@ pub const Inst = struct {
         none: void,
         dst_src: DstSrc,
         byte_swap: ByteSwap,
+        immediate: Immediate32,
+        dst_src_offset: DstSrcOffset,
         mov_with_offset: MovWithOffset,
         extra: u32,
     };

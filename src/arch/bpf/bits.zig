@@ -17,6 +17,9 @@ pub const Register = enum(u4) {
 /// https://docs.kernel.org/bpf/standardization/instruction-set.html
 /// https://gcc.gnu.org/wiki/BPFBackEnd
 pub const Instruction = packed struct(u64) {
+    pub const Immediate32 = u32;
+    pub const Offset = i16;
+
     pub const Class = enum(u3) {
         /// non-standard load
         ld,
@@ -46,10 +49,14 @@ pub const Instruction = packed struct(u64) {
                 /// use 32-bit immediate as source operand
                 /// if `operation` is `end`, this becomes a
                 /// `bpf_to_le`.
+                ///
+                /// also known as `k`.
                 immediate_or_to_le,
                 /// use `src_reg` register as source operand
                 /// if `operation` is `end`, this becomes a
                 /// `bpf_to_be`.
+                ///
+                /// also known as `x`.
                 src_reg_or_to_be,
             };
 
@@ -78,9 +85,11 @@ pub const Instruction = packed struct(u64) {
 
         pub const Jump = packed struct(u5) {
             pub const Source = enum(u1) {
-                /// use 32-bit immediate as source operand
+                /// use 32-bit immediate as source operand.
+                /// also known as `k`.
                 immediate,
-                /// use `src_reg` register as source operand
+                /// use `src_reg` register as source operand.
+                /// also known as `x`.
                 src_reg,
             };
 
@@ -171,9 +180,9 @@ pub const Instruction = packed struct(u64) {
     opcode: Opcode,
     dst_reg: Register,
     src_reg: Register,
-    offset: i16,
+    offset: Offset,
     immediate: packed union {
-        imm: u32,
+        imm: Immediate32,
         atomic_op: Opcode.LoadStore.AtomicOperation,
     },
 };
