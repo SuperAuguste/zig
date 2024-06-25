@@ -346,7 +346,7 @@ pub const Function = struct {
             const gpa = f.object.dg.gpa;
             try f.allocs.put(gpa, decl_c_value.new_local, false);
             try writer.writeAll("static ");
-            try f.object.dg.renderTypeAndName(writer, ty, decl_c_value, Const, .none, .complete);
+            try f.object.dg.renderTypeAndName(writer, ty, decl_c_value, Const, .none, .complete, .c_backend);
             try writer.writeAll(" = ");
             try f.object.dg.renderValue(writer, val, .StaticInitializer);
             try writer.writeAll(";\n ");
@@ -475,7 +475,7 @@ pub const Function = struct {
     }
 
     fn ctypeFromType(f: *Function, ty: Type, kind: CType.Kind) !CType {
-        return f.object.dg.ctypeFromType(ty, kind);
+        return f.object.dg.ctypeFromType(ty, kind, .c_backend);
     }
 
     fn byteSize(f: *Function, ctype: CType) u64 {
@@ -672,9 +672,9 @@ pub const DeclGen = struct {
         // them).  The analysis until now should ensure that the C function
         // pointers are compatible.  If they are not, then there is a bug
         // somewhere and we should let the C compiler tell us about it.
-        const ptr_ctype = try dg.ctypeFromType(ptr_ty, .complete);
+        const ptr_ctype = try dg.ctypeFromType(ptr_ty, .complete, .c_backend);
         const elem_ctype = ptr_ctype.info(ctype_pool).pointer.elem_ctype;
-        const decl_ctype = try dg.ctypeFromType(decl_ty, .complete);
+        const decl_ctype = try dg.ctypeFromType(decl_ty, .complete, .c_backend);
         const need_cast = !elem_ctype.eql(decl_ctype) and
             (elem_ctype.info(ctype_pool) != .function or decl_ctype.info(ctype_pool) != .function);
         if (need_cast) {
@@ -737,9 +737,9 @@ pub const DeclGen = struct {
         // them).  The analysis until now should ensure that the C function
         // pointers are compatible.  If they are not, then there is a bug
         // somewhere and we should let the C compiler tell us about it.
-        const ctype = try dg.ctypeFromType(ptr_ty, .complete);
+        const ctype = try dg.ctypeFromType(ptr_ty, .complete, .c_backend);
         const elem_ctype = ctype.info(ctype_pool).pointer.elem_ctype;
-        const decl_ctype = try dg.ctypeFromType(decl_ty, .complete);
+        const decl_ctype = try dg.ctypeFromType(decl_ty, .complete, .c_backend);
         const need_cast = !elem_ctype.eql(decl_ctype) and
             (elem_ctype.info(ctype_pool) != .function or decl_ctype.info(ctype_pool) != .function);
         if (need_cast) {
@@ -762,7 +762,7 @@ pub const DeclGen = struct {
         switch (derivation) {
             .comptime_alloc_ptr, .comptime_field_ptr => unreachable,
             .int => |int| {
-                const ptr_ctype = try dg.ctypeFromType(int.ptr_ty, .complete);
+                const ptr_ctype = try dg.ctypeFromType(int.ptr_ty, .complete, .c_backend);
                 const addr_val = try zcu.intValue(Type.usize, int.addr);
                 try writer.writeByte('(');
                 try dg.renderCType(writer, ptr_ctype);
@@ -782,11 +782,11 @@ pub const DeclGen = struct {
                 const parent_ptr_ty = try field.parent.ptrType(zcu);
 
                 // Ensure complete type definition is available before accessing fields.
-                _ = try dg.ctypeFromType(parent_ptr_ty.childType(zcu), .complete);
+                _ = try dg.ctypeFromType(parent_ptr_ty.childType(zcu), .complete, .c_backend);
 
                 switch (fieldLocation(parent_ptr_ty, field.result_ptr_ty, field.field_idx, zcu)) {
                     .begin => {
-                        const ptr_ctype = try dg.ctypeFromType(field.result_ptr_ty, .complete);
+                        const ptr_ctype = try dg.ctypeFromType(field.result_ptr_ty, .complete, .c_backend);
                         try writer.writeByte('(');
                         try dg.renderCType(writer, ptr_ctype);
                         try writer.writeByte(')');
@@ -799,7 +799,7 @@ pub const DeclGen = struct {
                         try dg.writeCValue(writer, name);
                     },
                     .byte_offset => |byte_offset| {
-                        const ptr_ctype = try dg.ctypeFromType(field.result_ptr_ty, .complete);
+                        const ptr_ctype = try dg.ctypeFromType(field.result_ptr_ty, .complete, .c_backend);
                         try writer.writeByte('(');
                         try dg.renderCType(writer, ptr_ctype);
                         try writer.writeByte(')');
@@ -813,7 +813,7 @@ pub const DeclGen = struct {
 
             .elem_ptr => |elem| if (!(try elem.parent.ptrType(zcu)).childType(zcu).hasRuntimeBits(zcu)) {
                 // Element type is zero-bit, so lowers to `void`. The index is irrelevant; just cast the pointer.
-                const ptr_ctype = try dg.ctypeFromType(elem.result_ptr_ty, .complete);
+                const ptr_ctype = try dg.ctypeFromType(elem.result_ptr_ty, .complete, .c_backend);
                 try writer.writeByte('(');
                 try dg.renderCType(writer, ptr_ctype);
                 try writer.writeByte(')');
@@ -822,8 +822,8 @@ pub const DeclGen = struct {
                 const index_val = try zcu.intValue(Type.usize, elem.elem_idx);
                 // We want to do pointer arithmetic on a pointer to the element type.
                 // We might have a pointer-to-array. In this case, we must cast first.
-                const result_ctype = try dg.ctypeFromType(elem.result_ptr_ty, .complete);
-                const parent_ctype = try dg.ctypeFromType(try elem.parent.ptrType(zcu), .complete);
+                const result_ctype = try dg.ctypeFromType(elem.result_ptr_ty, .complete, .c_backend);
+                const parent_ctype = try dg.ctypeFromType(try elem.parent.ptrType(zcu), .complete, .c_backend);
                 if (result_ctype.eql(parent_ctype)) {
                     // The pointer already has an appropriate type - just do the arithmetic.
                     try writer.writeByte('(');
@@ -841,7 +841,7 @@ pub const DeclGen = struct {
             },
 
             .offset_and_cast => |oac| {
-                const ptr_ctype = try dg.ctypeFromType(oac.new_ptr_ty, .complete);
+                const ptr_ctype = try dg.ctypeFromType(oac.new_ptr_ty, .complete, .c_backend);
                 try writer.writeByte('(');
                 try dg.renderCType(writer, ptr_ctype);
                 try writer.writeByte(')');
@@ -881,7 +881,7 @@ pub const DeclGen = struct {
 
         const ty = val.typeOf(zcu);
         if (val.isUndefDeep(zcu)) return dg.renderUndefValue(writer, ty, location);
-        const ctype = try dg.ctypeFromType(ty, location.toCTypeKind());
+        const ctype = try dg.ctypeFromType(ty, location.toCTypeKind(), .c_backend);
         switch (ip.indexToKey(val.toIntern())) {
             // types, not values
             .int_type,
@@ -1481,7 +1481,7 @@ pub const DeclGen = struct {
             .ReleaseFast, .ReleaseSmall => false,
         };
 
-        const ctype = try dg.ctypeFromType(ty, location.toCTypeKind());
+        const ctype = try dg.ctypeFromType(ty, location.toCTypeKind(), .c_backend);
         switch (ty.toIntern()) {
             .c_longdouble_type,
             .f16_type,
@@ -1778,7 +1778,7 @@ pub const DeclGen = struct {
 
         const fn_decl = zcu.declPtr(fn_decl_index);
         const fn_ty = fn_decl.typeOf(zcu);
-        const fn_ctype = try dg.ctypeFromType(fn_ty, kind);
+        const fn_ctype = try dg.ctypeFromType(fn_ty, kind, .c_backend);
 
         const fn_info = zcu.typeToFunc(fn_ty).?;
         if (fn_info.cc == .Naked) {
@@ -1878,9 +1878,9 @@ pub const DeclGen = struct {
         }
     }
 
-    fn ctypeFromType(dg: *DeclGen, ty: Type, kind: CType.Kind) !CType {
+    fn ctypeFromType(dg: *DeclGen, ty: Type, kind: CType.Kind, translation_mode: CType.TranslationMode) !CType {
         defer std.debug.assert(dg.scratch.items.len == 0);
-        return dg.ctype_pool.fromType(dg.gpa, &dg.scratch, ty, dg.zcu, dg.mod, kind);
+        return dg.ctype_pool.fromType(dg.gpa, &dg.scratch, ty, dg.zcu, dg.mod, kind, translation_mode);
     }
 
     fn byteSize(dg: *DeclGen, ctype: CType) u64 {
@@ -1899,7 +1899,7 @@ pub const DeclGen = struct {
     ///   | `renderType`        | "uint8_t *"     | "uint8_t *[10]"     |
     ///
     fn renderType(dg: *DeclGen, w: anytype, t: Type) error{OutOfMemory}!void {
-        try dg.renderCType(w, try dg.ctypeFromType(t, .complete));
+        try dg.renderCType(w, try dg.ctypeFromType(t, .complete, .c_backend));
     }
 
     fn renderCType(dg: *DeclGen, w: anytype, ctype: CType) error{OutOfMemory}!void {
@@ -2051,10 +2051,11 @@ pub const DeclGen = struct {
         qualifiers: CQualifiers,
         alignment: Alignment,
         kind: CType.Kind,
+        translation_mode: CType.TranslationMode,
     ) error{ OutOfMemory, AnalysisFail }!void {
         try dg.renderCTypeAndName(
             w,
-            try dg.ctypeFromType(ty, kind),
+            try dg.ctypeFromType(ty, kind, translation_mode),
             name,
             qualifiers,
             CType.AlignAs.fromAlignment(.{
@@ -2216,6 +2217,7 @@ pub const DeclGen = struct {
             CQualifiers.init(.{ .@"const" = variable.is_const }),
             decl.alignment,
             .complete,
+            .c_backend,
         );
         mangled: {
             const external_name = (if (maybe_exports) |exports|
@@ -2268,7 +2270,7 @@ pub const DeclGen = struct {
     }
 
     fn renderTypeForBuiltinFnName(dg: *DeclGen, writer: anytype, ty: Type) !void {
-        try dg.renderCTypeForBuiltinFnName(writer, try dg.ctypeFromType(ty, .complete));
+        try dg.renderCTypeForBuiltinFnName(writer, try dg.ctypeFromType(ty, .complete, .c_backend));
     }
 
     fn renderCTypeForBuiltinFnName(dg: *DeclGen, writer: anytype, ctype: CType) !void {
@@ -2291,7 +2293,7 @@ pub const DeclGen = struct {
     }
 
     fn renderBuiltinInfo(dg: *DeclGen, writer: anytype, ty: Type, info: BuiltinInfo) !void {
-        const ctype = try dg.ctypeFromType(ty, .complete);
+        const ctype = try dg.ctypeFromType(ty, .complete, .c_backend);
         const is_big = ctype.info(&dg.ctype_pool) == .array;
         switch (info) {
             .none => if (!is_big) return,
@@ -2323,7 +2325,7 @@ pub const DeclGen = struct {
             .dg = dg,
             .int_info = ty.intInfo(zcu),
             .kind = kind,
-            .ctype = try dg.ctypeFromType(ty, kind),
+            .ctype = try dg.ctypeFromType(ty, kind, .c_backend),
             .val = val,
         } };
     }
@@ -2371,7 +2373,7 @@ fn renderFwdDeclTypeName(
         }),
     }
 }
-fn renderTypePrefix(
+pub fn renderTypePrefix(
     pass: DeclGen.Pass,
     ctype_pool: *const CType.Pool,
     zcu: *Zcu,
@@ -2488,7 +2490,7 @@ fn renderTypePrefix(
     }
     return trailing;
 }
-fn renderTypeSuffix(
+pub fn renderTypeSuffix(
     pass: DeclGen.Pass,
     ctype_pool: *const CType.Pool,
     zcu: *Zcu,
@@ -2729,6 +2731,7 @@ pub fn genErrDecls(o: *Object) !void {
             Const,
             .none,
             .complete,
+            .c_backend,
         );
         try writer.writeAll(" = ");
         try o.dg.renderValue(writer, Value.fromInterned(name_val), .StaticInitializer);
@@ -2748,6 +2751,7 @@ pub fn genErrDecls(o: *Object) !void {
         Const,
         .none,
         .complete,
+        .c_backend,
     );
     try writer.writeAll(" = {");
     for (zcu.global_error_set.keys(), 0..) |name_nts, value| {
@@ -2807,6 +2811,7 @@ fn genExports(o: *Object) !void {
             CQualifiers.init(.{ .@"const" = is_variable_const }),
             decl.alignment,
             .complete,
+            .c_backend,
         );
         if (isMangledIdent(export_name, true)) {
             try fwd.print(" zig_mangled_export({ }, {s}, {s})", .{
@@ -2840,7 +2845,7 @@ pub fn genLazyFn(o: *Object, lazy_ctype_pool: *const CType.Pool, lazy_fn: LazyFn
             try w.writeAll("static ");
             try o.dg.renderType(w, name_slice_ty);
             try w.print(" {}(", .{val.fn_name.fmt(lazy_ctype_pool)});
-            try o.dg.renderTypeAndName(w, enum_ty, .{ .identifier = "tag" }, Const, .none, .complete);
+            try o.dg.renderTypeAndName(w, enum_ty, .{ .identifier = "tag" }, Const, .none, .complete, .c_backend);
             try w.writeAll(") {\n switch (tag) {\n");
             const tag_names = enum_ty.enumFields(zcu);
             for (0..tag_names.len) |tag_index| {
@@ -2861,7 +2866,7 @@ pub fn genLazyFn(o: *Object, lazy_ctype_pool: *const CType.Pool, lazy_fn: LazyFn
                 try w.print("  case {}: {{\n   static ", .{
                     try o.dg.fmtIntLiteral(try tag_val.intFromEnum(enum_ty, zcu), .Other),
                 });
-                try o.dg.renderTypeAndName(w, name_ty, .{ .identifier = "name" }, Const, .none, .complete);
+                try o.dg.renderTypeAndName(w, name_ty, .{ .identifier = "name" }, Const, .none, .complete, .c_backend);
                 try w.writeAll(" = ");
                 try o.dg.renderValue(w, Value.fromInterned(name_val), .Initializer);
                 try w.writeAll(";\n   return (");
@@ -2881,7 +2886,7 @@ pub fn genLazyFn(o: *Object, lazy_ctype_pool: *const CType.Pool, lazy_fn: LazyFn
         },
         .never_tail, .never_inline => |fn_decl_index| {
             const fn_decl = zcu.declPtr(fn_decl_index);
-            const fn_ctype = try o.dg.ctypeFromType(fn_decl.typeOf(zcu), .complete);
+            const fn_ctype = try o.dg.ctypeFromType(fn_decl.typeOf(zcu), .complete, .c_backend);
             const fn_info = fn_ctype.info(ctype_pool).function;
             const fn_name = fmtCTypePoolString(val.fn_name, lazy_ctype_pool);
 
@@ -3016,6 +3021,8 @@ pub fn genDecl(o: *Object) !void {
         try o.dg.renderFwdDecl(decl_index, variable, .final);
         try genExports(o);
 
+        std.log.info("IE {any}", .{variable.is_extern});
+
         if (variable.is_extern) return;
 
         const is_global = variable.is_extern or o.dg.declIsGlobal(decl.val);
@@ -3026,7 +3033,7 @@ pub fn genDecl(o: *Object) !void {
         if (decl.@"linksection".toSlice(&zcu.intern_pool)) |s|
             try w.print("zig_linksection({s}) ", .{fmtStringLiteral(s, null)});
         const decl_c_value = .{ .decl = decl_index };
-        try o.dg.renderTypeAndName(w, decl_ty, decl_c_value, .{}, decl.alignment, .complete);
+        try o.dg.renderTypeAndName(w, decl_ty, decl_c_value, .{}, decl.alignment, .complete, .c_backend);
         try w.writeAll(" = ");
         try o.dg.renderValue(w, Value.fromInterned(variable.init), .StaticInitializer);
         try w.writeByte(';');
@@ -3052,7 +3059,7 @@ pub fn genDeclValue(
     const ty = val.typeOf(zcu);
 
     try fwd_decl_writer.writeAll(if (is_global) "zig_extern " else "static ");
-    try o.dg.renderTypeAndName(fwd_decl_writer, ty, decl_c_value, Const, alignment, .complete);
+    try o.dg.renderTypeAndName(fwd_decl_writer, ty, decl_c_value, Const, alignment, .complete, .c_backend);
     switch (o.dg.pass) {
         .decl => |decl_index| {
             if (zcu.decl_exports.get(decl_index)) |exports| {
@@ -3074,10 +3081,40 @@ pub fn genDeclValue(
     if (!is_global) try w.writeAll("static ");
     if (@"linksection".toSlice(&zcu.intern_pool)) |s|
         try w.print("zig_linksection({s}) ", .{fmtStringLiteral(s, null)});
-    try o.dg.renderTypeAndName(w, ty, decl_c_value, Const, alignment, .complete);
+    try o.dg.renderTypeAndName(w, ty, decl_c_value, Const, alignment, .complete, .c_backend);
     try w.writeAll(" = ");
     try o.dg.renderValue(w, val, .StaticInitializer);
     try w.writeAll(";\n");
+}
+
+pub fn genHeaderDecl(dg: *DeclGen, zcu: *Zcu) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const decl_index = dg.pass.decl;
+    const decl = zcu.declPtr(decl_index);
+    const decl_ty = decl.typeOf(zcu);
+    const ip = &zcu.intern_pool;
+
+    assert(zcu.decl_exports.contains(decl_index));
+
+    switch (ip.indexToKey(decl.val.toIntern())) {
+        .variable => |variable| {
+            try dg.renderFwdDecl(decl_index, variable, .final);
+        },
+        .func => {
+            const fwd_decl_writer = dg.fwdDeclWriter();
+            try fwd_decl_writer.writeAll("zig_extern ");
+            try dg.renderFunctionSignature(fwd_decl_writer, decl_index, .complete, .{ .export_index = 0 });
+            try fwd_decl_writer.writeAll(";\n");
+        },
+        else => {
+            const fwd_decl_writer = dg.fwdDeclWriter();
+            try fwd_decl_writer.writeAll("zig_extern ");
+            try dg.renderTypeAndName(fwd_decl_writer, decl_ty, .{ .decl = decl_index }, .{}, .none, .complete, .emit_h);
+            try fwd_decl_writer.writeAll(";\n");
+        },
+    }
 }
 
 /// Generate code for an entire body which ends with a `noreturn` instruction. The states of
@@ -5164,7 +5201,7 @@ fn airAsm(f: *Function, inst: Air.Inst.Index) !CValue {
                     .alignas = CType.AlignAs.fromAbiAlignment(output_ty.abiAlignment(zcu)),
                 });
                 try f.allocs.put(gpa, output_local.new_local, false);
-                try f.object.dg.renderTypeAndName(writer, output_ty, output_local, .{}, .none, .complete);
+                try f.object.dg.renderTypeAndName(writer, output_ty, output_local, .{}, .none, .complete, .c_backend);
                 try writer.writeAll(" __asm(\"");
                 try writer.writeAll(constraint["={".len .. constraint.len - "}".len]);
                 try writer.writeAll("\")");
@@ -5199,7 +5236,7 @@ fn airAsm(f: *Function, inst: Air.Inst.Index) !CValue {
                     .alignas = CType.AlignAs.fromAbiAlignment(input_ty.abiAlignment(zcu)),
                 });
                 try f.allocs.put(gpa, input_local.new_local, false);
-                try f.object.dg.renderTypeAndName(writer, input_ty, input_local, Const, .none, .complete);
+                try f.object.dg.renderTypeAndName(writer, input_ty, input_local, Const, .none, .complete, .c_backend);
                 if (is_reg) {
                     try writer.writeAll(" __asm(\"");
                     try writer.writeAll(constraint["{".len .. constraint.len - "}".len]);

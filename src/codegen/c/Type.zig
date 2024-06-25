@@ -739,6 +739,7 @@ pub const Info = union(enum) {
     fwd_decl: FwdDecl,
     aggregate: Aggregate,
     function: Function,
+    @"enum": Enum,
 
     const Tag = @typeInfo(Info).Union.tag_type.?;
 
@@ -769,7 +770,7 @@ pub const Info = union(enum) {
         len: u64,
     };
 
-    pub const AggregateTag = enum { @"enum", @"struct", @"union" };
+    pub const AggregateTag = enum { @"struct", @"union" };
 
     pub const Field = struct {
         name: Pool.String,
@@ -855,6 +856,75 @@ pub const Info = union(enum) {
         return_ctype: CType,
         param_ctypes: CType.Slice,
         varargs: bool = false,
+    };
+
+    pub const EnumField = struct {
+        name: Pool.String,
+        value: u64,
+
+        pub const Slice = struct {
+            extra_index: Pool.ExtraIndex,
+            len: u32,
+
+            pub fn at(slice: EnumField.Slice, index: usize, pool: *const Pool) EnumField {
+                assert(index < slice.len);
+                const extra = pool.getExtra(Pool.EnumField, @intCast(slice.extra_index +
+                    index * @typeInfo(Pool.EnumField).Struct.fields.len));
+                return .{
+                    .name = .{ .index = extra.name },
+                    .ctype = .{ .index = extra.ctype },
+                    .alignas = extra.flags.alignas,
+                };
+            }
+
+            fn eqlAdapted(
+                lhs_slice: EnumField.Slice,
+                lhs_pool: *const Pool,
+                rhs_slice: EnumField.Slice,
+                rhs_pool: *const Pool,
+                pool_adapter: anytype,
+            ) bool {
+                if (lhs_slice.len != rhs_slice.len) return false;
+                for (0..lhs_slice.len) |index| {
+                    if (!lhs_slice.at(index, lhs_pool).eqlAdapted(
+                        lhs_pool,
+                        rhs_slice.at(index, rhs_pool),
+                        rhs_pool,
+                        pool_adapter,
+                    )) return false;
+                }
+                return true;
+            }
+        };
+
+        fn eqlAdapted(
+            lhs_field: EnumField,
+            lhs_pool: *const Pool,
+            rhs_field: EnumField,
+            rhs_pool: *const Pool,
+            pool_adapter: anytype,
+        ) bool {
+            if (!std.meta.eql(lhs_field.alignas, rhs_field.alignas)) return false;
+            if (!pool_adapter.eql(lhs_field.ctype, rhs_field.ctype)) return false;
+            return if (lhs_field.name.toPoolSlice(lhs_pool)) |lhs_name|
+                if (rhs_field.name.toPoolSlice(rhs_pool)) |rhs_name|
+                    std.mem.eql(u8, lhs_name, rhs_name)
+                else
+                    false
+            else
+                lhs_field.name.index == rhs_field.name.index;
+        }
+    };
+
+    pub const Enum = struct {
+        name: union(enum) {
+            anon: struct {
+                owner_decl: DeclIndex,
+                id: u32,
+            },
+            owner_decl: DeclIndex,
+        },
+        fields: EnumField.Slice,
     };
 
     pub fn eqlAdapted(
@@ -1142,7 +1212,6 @@ pub const Pool = struct {
                 return pool.tagTrailingExtra(allocator, hasher, switch (fwd_decl_info.tag) {
                     .@"struct" => .fwd_decl_struct_anon,
                     .@"union" => .fwd_decl_union_anon,
-                    .@"enum" => unreachable,
                 }, extra_index);
             },
             .owner_decl => |owner_decl| {
@@ -1150,7 +1219,6 @@ pub const Pool = struct {
                 return pool.tagData(allocator, hasher, switch (fwd_decl_info.tag) {
                     .@"struct" => .fwd_decl_struct,
                     .@"union" => .fwd_decl_union,
-                    .@"enum" => unreachable,
                 }, @intFromEnum(owner_decl));
             },
         }
@@ -1201,7 +1269,6 @@ pub const Pool = struct {
                         false => .aggregate_union_anon,
                         true => .aggregate_union_packed_anon,
                     },
-                    .@"enum" => unreachable,
                 }, extra_index);
             },
             .fwd_decl => |fwd_decl| {
@@ -1230,7 +1297,6 @@ pub const Pool = struct {
                         false => .aggregate_union,
                         true => .aggregate_union_packed,
                     },
-                    .@"enum" => unreachable,
                 }, extra_index);
             },
         }
@@ -1260,6 +1326,45 @@ pub const Pool = struct {
             false => .function,
             true => .function_varargs,
         }, extra_index);
+    }
+
+    pub fn getEnum(
+        pool: *Pool,
+        allocator: std.mem.Allocator,
+        enum_info: struct {
+            name: union(enum) {
+                anon: struct {
+                    owner_decl: DeclIndex,
+                    id: u32,
+                },
+                owner_decl: DeclIndex,
+            },
+            fields: []const Info.EnumField,
+        },
+    ) !CType {
+        var hasher = Hasher.init;
+        switch (enum_info.name) {
+            .anon => unreachable,
+            .owner_decl => |owner_decl| {
+                const extra: Enum = .{
+                    .owner_decl = owner_decl,
+                    .fields_len = @intCast(enum_info.fields.len),
+                };
+                const extra_index = try pool.addExtra(
+                    allocator,
+                    Enum,
+                    extra,
+                    enum_info.fields.len * @typeInfo(EnumField).Struct.fields.len,
+                );
+                for (enum_info.fields) |field| pool.addHashedExtraAssumeCapacity(&hasher, EnumField, .{
+                    .name = field.name.index,
+                    .value_lo = @truncate(field.value >> 0),
+                    .value_hi = @truncate(field.value >> 32),
+                });
+                hasher.updateExtra(Enum, extra, pool);
+                return pool.tagTrailingExtra(allocator, hasher, .@"enum", extra_index);
+            },
+        }
     }
 
     pub fn fromFields(
@@ -1342,6 +1447,7 @@ pub const Pool = struct {
         zcu: *Zcu,
         mod: *Module,
         kind: Kind,
+        translation_mode: TranslationMode,
     ) !CType {
         const ip = &zcu.intern_pool;
         switch (ty.toIntern()) {
@@ -1380,8 +1486,14 @@ pub const Pool = struct {
             .c_ulonglong_type => return .{ .index = .@"unsigned long long" },
             .c_longdouble_type => return .{ .index = .@"long double" },
             .f16_type => return CType.f16,
-            .f32_type => return CType.f32,
-            .f64_type => return CType.f64,
+            .f32_type => return switch (translation_mode) {
+                .c_backend => CType.f32,
+                .emit_h => .{ .index = .float },
+            },
+            .f64_type => return switch (translation_mode) {
+                .c_backend => CType.f64,
+                .emit_h => .{ .index = .double },
+            },
             .f80_type => return CType.f80,
             .f128_type => return CType.f128,
             .bool_type, .optional_noreturn_type => return CType.bool,
@@ -1403,6 +1515,7 @@ pub const Pool = struct {
                 zcu,
                 mod,
                 kind,
+                translation_mode,
             ),
             .anyerror_type,
             .anyerror_void_error_union_type,
@@ -1495,6 +1608,7 @@ pub const Pool = struct {
                                     zcu,
                                     mod,
                                     .forward,
+                                    translation_mode,
                                 ),
                                 .alignas = AlignAs.fromAlignment(.{
                                     .@"align" = ptr_info.flags.alignment,
@@ -1538,6 +1652,7 @@ pub const Pool = struct {
                                     zcu,
                                     mod,
                                     kind,
+                                    translation_mode,
                                 ),
                                 .alignas = AlignAs.fromAbiAlignment(Type.ptrAbiAlignment(target.*)),
                             },
@@ -1563,6 +1678,7 @@ pub const Pool = struct {
                         zcu,
                         mod,
                         kind.noParameter(),
+                        translation_mode,
                     );
                     if (elem_ctype.index == .void) return CType.void;
                     const array_ctype = try pool.getArray(allocator, .{
@@ -1589,6 +1705,7 @@ pub const Pool = struct {
                         zcu,
                         mod,
                         kind.noParameter(),
+                        translation_mode,
                     );
                     if (elem_ctype.index == .void) return CType.void;
                     const vector_ctype = try pool.getVector(allocator, .{
@@ -1614,6 +1731,7 @@ pub const Pool = struct {
                         zcu,
                         mod,
                         kind.noParameter(),
+                        translation_mode,
                     );
                     if (payload_ctype.index == .void) return CType.bool;
                     switch (payload_type) {
@@ -1657,6 +1775,7 @@ pub const Pool = struct {
                         zcu,
                         mod,
                         kind.noParameter(),
+                        translation_mode,
                     );
                     if (payload_ctype.index == .void) return error_set_ctype;
                     const target = &mod.resolved_target.result;
@@ -1681,11 +1800,13 @@ pub const Pool = struct {
                     const loaded_struct = ip.loadStructType(ip_index);
                     switch (loaded_struct.layout) {
                         .auto, .@"extern" => {
+                            const last = pool.items.len;
                             const fwd_decl = try pool.getFwdDecl(allocator, .{
                                 .tag = .@"struct",
                                 .name = .{ .owner_decl = loaded_struct.decl.unwrap().? },
                             });
-                            if (kind.isForward()) return if (ty.hasRuntimeBitsIgnoreComptime(zcu))
+                            const should_define = translation_mode == .emit_h and fwd_decl.toPoolIndex() != null and fwd_decl.toPoolIndex().? == last;
+                            if (kind.isForward() and !should_define) return if (ty.hasRuntimeBitsIgnoreComptime(zcu))
                                 fwd_decl
                             else
                                 CType.void;
@@ -1709,6 +1830,7 @@ pub const Pool = struct {
                                     zcu,
                                     mod,
                                     kind.noParameter(),
+                                    translation_mode,
                                 );
                                 if (field_ctype.index == .void) continue;
                                 const field_name = if (loaded_struct.fieldName(ip, field_index)
@@ -1748,6 +1870,7 @@ pub const Pool = struct {
                             zcu,
                             mod,
                             kind,
+                            translation_mode,
                         ),
                     }
                 },
@@ -1769,6 +1892,7 @@ pub const Pool = struct {
                             zcu,
                             mod,
                             kind.noParameter(),
+                            translation_mode,
                         );
                         if (field_ctype.index == .void) continue;
                         const field_name = if (anon_struct_info.fieldName(ip, @intCast(field_index))
@@ -1806,7 +1930,15 @@ pub const Pool = struct {
                             extra_index,
                         );
                     }
-                    const fwd_decl = try pool.fromType(allocator, scratch, ty, zcu, mod, .forward);
+                    const fwd_decl = try pool.fromType(
+                        allocator,
+                        scratch,
+                        ty,
+                        zcu,
+                        mod,
+                        .forward,
+                        translation_mode,
+                    );
                     try pool.ensureUnusedCapacity(allocator, 1);
                     const extra_index = try pool.addHashedExtra(allocator, &hasher, Aggregate, .{
                         .fwd_decl = fwd_decl.index,
@@ -1820,11 +1952,15 @@ pub const Pool = struct {
                     switch (loaded_union.getLayout(ip)) {
                         .auto, .@"extern" => {
                             const has_tag = loaded_union.hasTag(ip);
+
+                            const last = pool.items.len;
                             const fwd_decl = try pool.getFwdDecl(allocator, .{
                                 .tag = if (has_tag) .@"struct" else .@"union",
                                 .name = .{ .owner_decl = loaded_union.decl },
                             });
-                            if (kind.isForward()) return if (ty.hasRuntimeBitsIgnoreComptime(zcu))
+                            const should_define = translation_mode == .emit_h and fwd_decl.toPoolIndex() != null and fwd_decl.toPoolIndex().? == last;
+
+                            if (kind.isForward() and !should_define) return if (ty.hasRuntimeBitsIgnoreComptime(zcu))
                                 fwd_decl
                             else
                                 CType.void;
@@ -1850,6 +1986,7 @@ pub const Pool = struct {
                                     zcu,
                                     mod,
                                     kind.noParameter(),
+                                    translation_mode,
                                 );
                                 if (field_ctype.index == .void) continue;
                                 const field_name = try pool.string(
@@ -1898,6 +2035,7 @@ pub const Pool = struct {
                                     zcu,
                                     mod,
                                     kind.noParameter(),
+                                    translation_mode,
                                 );
                                 if (tag_ctype.index != .void) {
                                     struct_fields[struct_fields_len] = .{
@@ -1956,14 +2094,17 @@ pub const Pool = struct {
                     }
                 },
                 .opaque_type => return CType.void,
-                .enum_type => return pool.fromType(
-                    allocator,
-                    scratch,
-                    Type.fromInterned(ip.loadEnumType(ip_index).tag_ty),
-                    zcu,
-                    mod,
-                    kind,
-                ),
+                .enum_type => {
+                    return pool.fromType(
+                        allocator,
+                        scratch,
+                        Type.fromInterned(ip.loadEnumType(ip_index).tag_ty),
+                        zcu,
+                        mod,
+                        kind,
+                        translation_mode,
+                    );
+                },
                 .func_type => |func_info| if (func_info.is_generic) return CType.void else {
                     const scratch_top = scratch.items.len;
                     defer scratch.shrinkRetainingCapacity(scratch_top);
@@ -1978,6 +2119,7 @@ pub const Pool = struct {
                         zcu,
                         mod,
                         kind.asParameter(),
+                        translation_mode,
                     ) else CType.void;
                     for (0..func_info.param_types.len) |param_index| {
                         const param_type = Type.fromInterned(
@@ -1990,6 +2132,7 @@ pub const Pool = struct {
                             zcu,
                             mod,
                             kind.asParameter(),
+                            translation_mode,
                         );
                         if (param_ctype.index == .void) continue;
                         hasher.update(param_ctype.hash(pool));
@@ -2385,6 +2528,7 @@ pub const Pool = struct {
         aggregate_union_packed,
         function,
         function_varargs,
+        @"enum",
     };
 
     const Aligned = struct {
@@ -2439,6 +2583,28 @@ pub const Pool = struct {
     const Function = struct {
         return_ctype: CType.Index,
         param_ctypes_len: u32,
+    };
+
+    const EnumField = struct {
+        name: String.Index,
+        value_lo: u32,
+        value_hi: u32,
+
+        fn value(extra: EnumField) u64 {
+            return @as(u64, extra.value_lo) << 0 |
+                @as(u64, extra.value_hi) << 32;
+        }
+    };
+
+    const EnumAnon = struct {
+        owner_decl: DeclIndex,
+        id: u32,
+        fields_len: u32,
+    };
+
+    const Enum = struct {
+        owner_decl: DeclIndex,
+        fields_len: u32,
     };
 
     fn addExtra(
@@ -2577,6 +2743,8 @@ pub const AlignAs = packed struct {
         return alignas.@"align".toByteUnits().?;
     }
 };
+
+pub const TranslationMode = enum { c_backend, emit_h };
 
 const Alignment = @import("../../InternPool.zig").Alignment;
 const assert = std.debug.assert;

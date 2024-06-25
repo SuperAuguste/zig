@@ -1350,9 +1350,9 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
                 .path = try options.global_cache_directory.join(arena, &[_][]const u8{zir_sub_dir}),
             };
 
-            const emit_h: ?*Module.GlobalEmitH = if (options.emit_h) |loc| eh: {
-                const eh = try arena.create(Module.GlobalEmitH);
-                eh.* = .{ .loc = loc };
+            const emit_h: ?*EmitH = if (options.emit_h) |loc| eh: {
+                const eh = try arena.create(EmitH);
+                eh.* = .{ .comp = comp, .loc = loc };
                 break :eh eh;
             } else null;
 
@@ -2268,7 +2268,7 @@ fn flush(comp: *Compilation, arena: Allocator, prog_node: std.Progress.Node) !vo
     }
 
     if (comp.module) |zcu| {
-        try EmitH.flushEmitH(zcu);
+        if (zcu.emit_h) |emit_h| try emit_h.flushEmitH(arena, prog_node);
 
         if (zcu.llvm_object) |llvm_object| {
             if (build_options.only_c) unreachable;
@@ -2860,13 +2860,6 @@ pub fn totalErrorCount(comp: *Compilation) u32 {
                 }
             }
         }
-        if (module.emit_h) |emit_h| {
-            for (emit_h.failed_decls.keys()) |key| {
-                if (module.declFileScope(key).okToReportErrors()) {
-                    total += 1;
-                }
-            }
-        }
 
         if (module.global_error_set.entries.len - 1 > module.error_limit) {
             total += 1;
@@ -2976,15 +2969,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
                 }
             }
         }
-        if (module.emit_h) |emit_h| {
-            for (emit_h.failed_decls.keys(), emit_h.failed_decls.values()) |decl_index, error_msg| {
-                // Skip errors for Decls within files that had a parse failure.
-                // We'll try again once parsing succeeds.
-                if (module.declFileScope(decl_index).okToReportErrors()) {
-                    try addModuleErrorMsg(module, &bundle, error_msg.*);
-                }
-            }
-        }
+
         for (module.failed_exports.values()) |value| {
             try addModuleErrorMsg(module, &bundle, value.*);
         }
@@ -3424,36 +3409,11 @@ fn processOneJob(comp: *Compilation, job: Job, prog_node: std.Progress.Node) !vo
                     const named_frame = tracy.namedFrame("emit_h_decl");
                     defer named_frame.end();
 
-                    const gpa = comp.gpa;
                     const emit_h = module.emit_h.?;
 
-                    const gop = try emit_h.decl_table.getOrPut(gpa, decl_index);
-
-                    // TODO: Remove the line below once dependency loops are properly handled
-                    if (gop.found_existing) return;
-
-                    const decl_emit_h = if (gop.found_existing)
-                        emit_h.allocated_emit_h.at(gop.index)
-                    else blk: {
-                        const decl_emit_h = try emit_h.allocated_emit_h.addOne(gpa);
-                        decl_emit_h.* = .{};
-                        break :blk decl_emit_h;
-                    };
-
-                    std.debug.assert(emit_h.allocated_emit_h.len == emit_h.decl_table.count());
-
-                    var emitter = EmitH{
-                        .gpa = gpa,
-                        .zcu = module,
-                        .decl = decl,
-                        .decl_index = decl_index,
-                        .emit_h = decl_emit_h,
-                        .error_msg = null,
-                    };
-
-                    emitter.renderDecl() catch |err| switch (err) {
+                    emit_h.genDecl(decl_index) catch |err| switch (err) {
                         error.AnalysisFail => {
-                            try emit_h.failed_decls.put(gpa, decl_index, emitter.error_msg.?);
+                            try module.failed_decls.put(module.gpa, decl_index, emit_h.last_err.?);
                             return;
                         },
                         else => |e| return e,

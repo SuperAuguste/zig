@@ -37,6 +37,7 @@ const InternPool = @import("InternPool.zig");
 const Alignment = InternPool.Alignment;
 const BuiltinFn = std.zig.BuiltinFn;
 const LlvmObject = @import("codegen/llvm.zig").Object;
+const EmitH = @import("EmitH.zig");
 
 comptime {
     @setEvalBranchQuota(4000);
@@ -172,7 +173,7 @@ stage1_flags: packed struct {
 
 compile_log_text: ArrayListUnmanaged(u8) = .{},
 
-emit_h: ?*GlobalEmitH,
+emit_h: ?*EmitH,
 
 test_functions: std.AutoArrayHashMapUnmanaged(Decl.Index, void) = .{},
 
@@ -232,29 +233,6 @@ pub const CImportError = struct {
         if (err.path) |some| gpa.free(std.mem.span(some));
         if (err.source_line) |some| gpa.free(std.mem.span(some));
         gpa.free(std.mem.span(err.msg));
-    }
-};
-
-/// A `Module` has zero or one of these depending on whether `-femit-h` is enabled.
-pub const GlobalEmitH = struct {
-    /// Where to put the output.
-    loc: Compilation.EmitLoc,
-    /// When emit_h is non-null, each Decl gets one more compile error slot for
-    /// emit-h failing for that Decl. This table is also how we tell if a Decl has
-    /// failed emit-h or succeeded.
-    failed_decls: std.AutoArrayHashMapUnmanaged(Decl.Index, *ErrorMsg) = .{},
-    /// Tracks all decls in order to iterate over them and emit .h code for them.
-    decl_table: std.AutoArrayHashMapUnmanaged(Decl.Index, void) = .{},
-    /// Similar to the allocated_decls field of Module, this is where `EmitH` objects
-    /// are allocated. There will be exactly one EmitH object per decl_table entry, with
-    /// identical indexes.
-    allocated_emit_h: std.SegmentedList(EmitH, 0) = .{},
-
-    pub fn declPtr(global_emit_h: *GlobalEmitH, decl_index: Decl.Index) ?*EmitH {
-        return if (global_emit_h.decl_table.getIndex(decl_index)) |index|
-            global_emit_h.allocated_emit_h.at(index)
-        else
-            null;
     }
 };
 
@@ -567,12 +545,6 @@ pub const Decl = struct {
             .offset = LazySrcLoc.Offset.nodeOffset(0),
         };
     }
-};
-
-/// This state is attached to every Decl when Module emit_h is non-null.
-pub const EmitH = struct {
-    fwd_decl: ArrayListUnmanaged(u8) = .{},
-    header_section: @import("EmitH.zig").HeaderSection = .unknown,
 };
 
 pub const DeclAdapter = struct {
@@ -2457,14 +2429,7 @@ pub fn deinit(zcu: *Zcu) void {
     }
     failed_decls.deinit(gpa);
 
-    if (zcu.emit_h) |emit_h| {
-        for (emit_h.failed_decls.values()) |value| {
-            value.destroy(gpa);
-        }
-        emit_h.failed_decls.deinit(gpa);
-        emit_h.decl_table.deinit(gpa);
-        emit_h.allocated_emit_h.deinit(gpa);
-    }
+    if (zcu.emit_h) |emit_h| emit_h.deinit();
 
     for (zcu.failed_files.values()) |value| {
         if (value) |msg| msg.destroy(gpa);
@@ -2545,10 +2510,7 @@ pub fn destroyDecl(mod: *Module, decl_index: Decl.Index) void {
     ip.destroyDecl(gpa, decl_index);
 
     if (mod.emit_h) |mod_emit_h| {
-        if (mod_emit_h.declPtr(decl_index)) |decl_emit_h| {
-            decl_emit_h.fwd_decl.deinit(gpa);
-            decl_emit_h.* = undefined;
-        }
+        mod_emit_h.destroyDecl(decl_index);
     }
 }
 
